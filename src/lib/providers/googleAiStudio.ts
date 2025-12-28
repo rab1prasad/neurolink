@@ -1,14 +1,18 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { streamText, type Schema, type LanguageModelV1 } from "ai";
 import type { ZodUnknownSchema } from "../types/typeAliases.js";
-import type { AIProviderName } from "../types/index.js";
-import { GoogleAIModels } from "../types/index.js";
+import { AIProviderName, GoogleAIModels } from "../constants/enums.js";
 import type {
   StreamOptions,
   StreamResult,
   AudioChunk,
 } from "../types/streamTypes.js";
 import type { UnknownRecord } from "../types/common.js";
+import type {
+  LiveServerMessage,
+  GenAIClient,
+  GoogleGenAIClass,
+} from "../types/providers.js";
 import type { NeuroLink } from "../neurolink.js";
 import { BaseProvider } from "../core/baseProvider.js";
 import { logger } from "../utils/logger.js";
@@ -21,61 +25,14 @@ import {
 } from "../types/errors.js";
 import { DEFAULT_MAX_STEPS } from "../core/constants.js";
 import { streamAnalyticsCollector } from "../core/streamAnalytics.js";
-import { buildMessagesArray } from "../utils/messageBuilder.js";
 
-// Interfaces setup
-interface GenAILiveMedia {
-  data: string;
-  mimeType: string;
-}
-interface LiveServerMessagePartInlineData {
-  data?: string;
-}
-interface LiveServerMessageModelTurn {
-  parts?: Array<{ inlineData?: LiveServerMessagePartInlineData }>;
-}
-interface LiveServerContent {
-  modelTurn?: LiveServerMessageModelTurn;
-  interrupted?: boolean;
-}
-interface LiveServerMessage {
-  serverContent?: LiveServerContent;
-}
-interface LiveConnectCallbacks {
-  onopen?: () => void;
-  onmessage?: (message: LiveServerMessage) => void;
-  onerror?: (e: { message?: string }) => void;
-  onclose?: (e: { code?: number; reason?: string }) => void;
-}
-interface LiveConnectConfig {
-  model: string;
-  callbacks: LiveConnectCallbacks;
-  config: {
-    responseModalities: string[];
-    speechConfig: {
-      voiceConfig: { prebuiltVoiceConfig: { voiceName: string } };
-    };
-  };
-}
-interface GenAILiveSession {
-  sendRealtimeInput?: (payload: {
-    media?: GenAILiveMedia;
-    event?: string;
-  }) => Promise<void> | void;
-  sendInput?: (payload: {
-    event?: string;
-    media?: GenAILiveMedia;
-  }) => Promise<void> | void;
-  close?: (code?: number, reason?: string) => Promise<void> | void;
-}
-interface GenAIClient {
-  live: { connect: (config: LiveConnectConfig) => Promise<GenAILiveSession> };
-}
-type GoogleGenAIClass = new (cfg: { apiKey: string }) => GenAIClient;
+// Google AI Live API types now imported from ../types/providerSpecific.js
+
+// Import proper types for multimodal message handling
 
 // Create Google GenAI client
 async function createGoogleGenAIClient(apiKey: string): Promise<GenAIClient> {
-  const mod: unknown = await import("@google/generative-ai");
+  const mod: unknown = await import("@google/genai");
   const ctor = (mod as Record<string, unknown>).GoogleGenAI as unknown;
   if (!ctor) {
     throw new Error("@google/genai does not export GoogleGenAI");
@@ -95,6 +52,33 @@ if (
 /**
  * Google AI Studio provider implementation using BaseProvider
  * Migrated from original GoogleAIStudio class to new factory pattern
+ *
+ * @important Structured Output Limitation
+ * Google Gemini models cannot combine function calling (tools) with structured
+ * output (JSON schema). When using schemas with output.format: "json", you MUST
+ * set disableTools: true.
+ *
+ * Error without disableTools:
+ * "Function calling with a response mime type: 'application/json' is unsupported"
+ *
+ * This is a Google API limitation documented at:
+ * https://ai.google.dev/gemini-api/docs/function-calling
+ *
+ * @example
+ * ```typescript
+ * // ✅ Correct usage with schemas
+ * const provider = new GoogleAIStudioProvider("gemini-2.5-flash");
+ * const result = await provider.generate({
+ *   input: { text: "Analyze data" },
+ *   schema: MySchema,
+ *   output: { format: "json" },
+ *   disableTools: true  // Required
+ * });
+ * ```
+ *
+ * @note Gemini 3 Pro Preview (November 2025) will support combining tools + schemas
+ * @note "Too many states for serving" errors can occur with complex schemas + tools.
+ *       Solution: Simplify schema or use disableTools: true
  */
 export class GoogleAIStudioProvider extends BaseProvider {
   constructor(modelName?: string, sdk?: unknown) {
@@ -176,8 +160,7 @@ export class GoogleAIStudioProvider extends BaseProvider {
       process.env.GOOGLE_GENERATIVE_AI_API_KEY = apiKey;
     }
 
-    const google = createGoogleGenerativeAI({ apiKey });
-    const model = google(this.modelName);
+    const model = await this.getAISDKModelWithMiddleware(options);
 
     const timeout = this.getTimeout(options);
     const timeoutController = createTimeoutController(
@@ -191,8 +174,9 @@ export class GoogleAIStudioProvider extends BaseProvider {
       const shouldUseTools = !options.disableTools && this.supportsTools();
       const tools = shouldUseTools ? await this.getAllTools() : {};
 
-      // Build message array from options
-      const messages = buildMessagesArray(options);
+      // Build message array from options with multimodal support
+      // Using protected helper from BaseProvider to eliminate code duplication
+      const messages = await this.buildMessagesForStream(options);
 
       const result = await streamText({
         model,
@@ -203,6 +187,23 @@ export class GoogleAIStudioProvider extends BaseProvider {
         maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
         toolChoice: shouldUseTools ? "auto" : "none",
         abortSignal: timeoutController?.controller.signal,
+        experimental_telemetry: this.getStreamTelemetryConfig(options),
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn(
+              "[GoogleAiStudioProvider] Failed to store tool executions",
+              {
+                provider: this.providerName,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+          });
+        },
       });
 
       timeoutController?.cleanup();

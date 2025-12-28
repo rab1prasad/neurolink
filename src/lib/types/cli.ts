@@ -8,9 +8,31 @@ import type { EvaluationData } from "../index.js";
 import type { ToolCall, ToolResult } from "./tools.js";
 
 /**
- * Base command arguments interface
+ * Ollama command utilities type
  */
-export interface BaseCommandArgs {
+export type AllowedCommand =
+  | "ollama"
+  | "curl"
+  | "systemctl"
+  | "pkill"
+  | "killall"
+  | "open"
+  | "taskkill"
+  | "start";
+
+/**
+ * Defines the schema for a session variable or a generation option.
+ */
+export type OptionSchema = {
+  type: "string" | "boolean" | "number";
+  description: string;
+  allowedValues?: string[];
+};
+
+/**
+ * Base command arguments type
+ */
+export type BaseCommandArgs = {
   /** Enable debug output */
   debug?: boolean;
   /** Output format */
@@ -21,12 +43,12 @@ export interface BaseCommandArgs {
   quiet?: boolean;
   /** Index signature to allow additional properties */
   [key: string]: unknown;
-}
+};
 
 /**
  * Generate command arguments
  */
-export interface GenerateCommandArgs extends BaseCommandArgs {
+export type GenerateCommandArgs = BaseCommandArgs & {
   /** Input text or prompt */
   input?: string;
   /** AI provider to use */
@@ -51,12 +73,12 @@ export interface GenerateCommandArgs extends BaseCommandArgs {
   maxSteps?: number;
   /** Output file */
   output?: string;
-}
+};
 
 /**
  * Stream command arguments
  */
-export interface StreamCommandArgs extends BaseCommandArgs {
+export type StreamCommandArgs = BaseCommandArgs & {
   /** Input text or prompt */
   input?: string;
   /** AI provider to use */
@@ -71,12 +93,12 @@ export interface StreamCommandArgs extends BaseCommandArgs {
   maxTokens?: number;
   /** Disable tools */
   disableTools?: boolean;
-}
+};
 
 /**
  * Batch command arguments
  */
-export interface BatchCommandArgs extends BaseCommandArgs {
+export type BatchCommandArgs = BaseCommandArgs & {
   /** Input file path */
   file?: string;
   /** AI provider to use */
@@ -95,12 +117,12 @@ export interface BatchCommandArgs extends BaseCommandArgs {
   output?: string;
   /** Disable tools */
   disableTools?: boolean;
-}
+};
 
 /**
  * MCP command arguments - Enhanced with transport and server management
  */
-export interface MCPCommandArgs extends BaseCommandArgs {
+export type MCPCommandArgs = BaseCommandArgs & {
   /** MCP server name */
   server?: string;
   /** MCP server name (alias for server) */
@@ -141,12 +163,12 @@ export interface MCPCommandArgs extends BaseCommandArgs {
   source?: string;
   /** Connection timeout */
   timeout?: number;
-}
+};
 
 /**
  * Models command arguments - Enhanced for model management
  */
-export interface ModelsCommandArgs extends Omit<BaseCommandArgs, "format"> {
+export type ModelsCommandArgs = Omit<BaseCommandArgs, "format"> & {
   // List command options
   /** AI provider to query (single or array) */
   provider?: string | string[];
@@ -230,12 +252,12 @@ export interface ModelsCommandArgs extends Omit<BaseCommandArgs, "format"> {
   resolve?: boolean;
   /** Maximum tokens filter */
   maxTokens?: number;
-}
+};
 
 /**
  * Ollama command arguments
  */
-export interface OllamaCommandArgs extends BaseCommandArgs {
+export type OllamaCommandArgs = BaseCommandArgs & {
   /** Ollama model name */
   model?: string;
   /** List available models */
@@ -246,12 +268,12 @@ export interface OllamaCommandArgs extends BaseCommandArgs {
   remove?: boolean;
   /** Show model information */
   show?: boolean;
-}
+};
 
 /**
  * SageMaker command arguments
  */
-export interface SageMakerCommandArgs extends BaseCommandArgs {
+export type SageMakerCommandArgs = BaseCommandArgs & {
   /** SageMaker endpoint name */
   endpoint?: string;
   /** Model name for the endpoint */
@@ -282,22 +304,36 @@ export interface SageMakerCommandArgs extends BaseCommandArgs {
   region?: string;
   /** Force operation without confirmation */
   force?: boolean;
-}
+};
+
+/**
+ * Secure configuration container that avoids process.env exposure
+ */
+export type SecureConfiguration = {
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string;
+  endpointName: string;
+  timeout: number;
+  maxRetries: number;
+  sessionId: string;
+  createdAt: number;
+};
 
 /**
  * Provider status command arguments
  */
-export interface ProviderStatusArgs extends BaseCommandArgs {
+export type ProviderStatusArgs = BaseCommandArgs & {
   /** Specific provider to check */
   provider?: string;
   /** Check all providers */
   all?: boolean;
-}
+};
 
 /**
  * CLI command result
  */
-export interface CommandResult {
+export type CommandResult = {
   /** Command success status */
   success: boolean;
   /** Result data */
@@ -312,12 +348,12 @@ export interface CommandResult {
     timestamp?: number;
     command?: string;
   };
-}
+};
 
 /**
  * Generate command result
  */
-export interface GenerateResult extends CommandResult {
+export type GenerateResult = CommandResult & {
   content: string;
   provider?: string;
   model?: string;
@@ -339,27 +375,29 @@ export interface GenerateResult extends CommandResult {
     name: string;
     description: string;
   }>;
-}
+  /** TTS audio result when TTS is enabled */
+  audio?: import("./index.js").TTSResult;
+};
 
 /**
  * Stream result chunk
  */
-export interface StreamChunk {
+export type StreamChunk = {
   content?: string;
   delta?: string;
   done?: boolean;
   metadata?: UnknownRecord;
-}
+};
 
 /**
  * CLI output formatting options
  */
-export interface OutputOptions {
-  format: "text" | "json" | "table";
+export type OutputOptions = {
+  format: "text" | "json" | "table" | "yaml";
   pretty?: boolean;
   color?: boolean;
   compact?: boolean;
-}
+};
 
 /**
  * Command handler function type
@@ -371,7 +409,7 @@ export type CommandHandler<TArgs = BaseCommandArgs, TResult = CommandResult> = (
 /**
  * Command definition
  */
-export interface CommandDefinition<TArgs = BaseCommandArgs> {
+export type CommandDefinition<TArgs = BaseCommandArgs> = {
   name: string;
   description: string;
   aliases?: string[];
@@ -384,42 +422,42 @@ export interface CommandDefinition<TArgs = BaseCommandArgs> {
     };
   };
   handler: CommandHandler<TArgs>;
-}
+};
 
 /**
  * CLI context
  */
-export interface CLIContext {
+export type CLIContext = {
   cwd: string;
   args: string[];
   env: NodeJS.ProcessEnv;
   exitCode?: number;
-}
+};
 
 /**
  * Color mapping for CLI output
  */
-export interface ColorMap {
+export type ColorMap = {
   [severity: string]: {
     color: string;
     symbol?: string;
   };
-}
+};
 
 /**
  * Display severity colors (for evaluation display)
  */
-export interface SeverityColors {
+export type SeverityColors = {
   [key: string]: {
     color: string;
     symbol: string;
   };
-}
+};
 
 /**
  * JSON output structure
  */
-export interface JSONOutput {
+export type JSONOutput = {
   success: boolean;
   data?: JsonValue;
   error?: string;
@@ -428,14 +466,45 @@ export interface JSONOutput {
     command: string;
     version?: string;
   };
-}
+};
 
 /**
  * Console override for quiet mode
  */
-export interface ConsoleOverride {
+export type ConsoleOverride = {
   [method: string]: (() => void) | undefined;
-}
+};
+
+/**
+ * Conversation choice for inquirer prompt
+ */
+export type ConversationChoice = {
+  name: string;
+  value: string | "NEW_CONVERSATION";
+  short: string;
+};
+
+/**
+ * Session restore result
+ */
+export type SessionRestoreResult = {
+  success: boolean;
+  sessionId: string;
+  messageCount: number;
+  error?: string;
+  lastActivity?: string;
+};
+
+/**
+ * Tool context for restored sessions
+ */
+export type RestorationToolContext = Record<string, unknown> & {
+  sessionId: string;
+  userId: string;
+  source: string;
+  restored: boolean;
+  timestamp: string;
+};
 
 /**
  * Type guard for generate result
@@ -459,4 +528,282 @@ export function isCommandResult(value: unknown): value is CommandResult {
     "success" in value &&
     typeof (value as CommandResult).success === "boolean"
   );
+}
+
+// ============================================================================
+// CLI Setup and Utility Types (moved from CLI modules)
+// ============================================================================
+
+/**
+ * Environment file backup result
+ */
+export type EnvBackupResult = {
+  backupPath?: string;
+  existed: boolean;
+};
+
+/**
+ * Environment file update result
+ */
+export type EnvUpdateResult = {
+  backup: EnvBackupResult;
+  updated: string[];
+  added: string[];
+  unchanged: string[];
+  deleted: string[];
+};
+
+/**
+ * Provider configuration for interactive setup
+ */
+export type CLIProviderConfig = {
+  id: string;
+  name: string;
+  description: string;
+  envVars: Array<{
+    key: string;
+    prompt: string;
+    secure?: boolean;
+    default?: string;
+    optional?: boolean;
+  }>;
+};
+
+/**
+ * Interactive setup result
+ */
+export type CLISetupResult = {
+  selectedProviders: string[];
+  credentials: Record<string, string>;
+  envFileBackup?: string;
+  testResults: Array<{
+    provider: string;
+    status: "working" | "failed";
+    error?: string;
+    responseTime?: number;
+  }>;
+};
+
+/**
+ * Main setup command arguments
+ */
+export type SetupArgs = {
+  provider?: string;
+  list?: boolean;
+  status?: boolean;
+  interactive?: boolean;
+  help?: boolean;
+};
+
+/**
+ * Provider information for setup display
+ */
+export type ProviderInfo = {
+  id: string;
+  name: string;
+  emoji: string;
+  description: string;
+  setupTime: string;
+  cost: string;
+  difficulty?: "Easy" | "Medium" | "Hard";
+  features?: string[];
+  bestFor?: string;
+  models?: string;
+  strengths?: string;
+  pricing?: string;
+  setupCommand?: string;
+  handler?: (argv: {
+    check?: boolean;
+    nonInteractive?: boolean;
+  }) => Promise<void>;
+};
+
+/**
+ * Setup command factory arguments
+ */
+export type SetupCommandArgs = BaseCommandArgs & {
+  provider?: string;
+  check?: boolean;
+  list?: boolean;
+  status?: boolean;
+  interactive?: boolean;
+  nonInteractive?: boolean;
+};
+
+/**
+ * MCP server configuration for CLI
+ */
+export type CLIMCPServerConfig = {
+  name: string;
+  transport: "stdio" | "websocket" | "tcp" | "unix";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  description?: string;
+};
+
+// ============================================================================
+// Provider-Specific Setup Types
+// ============================================================================
+
+/**
+ * OpenAI setup configuration types
+ */
+export namespace OpenAISetup {
+  export interface SetupOptions {
+    checkOnly?: boolean;
+    interactive?: boolean;
+  }
+
+  export interface SetupArgv {
+    check?: boolean;
+    nonInteractive?: boolean;
+  }
+
+  export interface Config {
+    apiKey?: string;
+    organization?: string;
+    model?: string;
+    isReconfiguring?: boolean;
+  }
+}
+
+/**
+ * Anthropic setup configuration types
+ */
+export namespace AnthropicSetup {
+  export interface SetupOptions {
+    checkOnly?: boolean;
+    interactive?: boolean;
+  }
+
+  export interface SetupArgv {
+    check?: boolean;
+    nonInteractive?: boolean;
+  }
+
+  export interface Config {
+    apiKey?: string;
+    model?: string;
+    isReconfiguring?: boolean;
+  }
+}
+
+/**
+ * Google AI setup configuration types
+ */
+export namespace GoogleAISetup {
+  export interface SetupOptions {
+    checkOnly?: boolean;
+    interactive?: boolean;
+  }
+
+  export interface SetupArgv {
+    check?: boolean;
+    nonInteractive?: boolean;
+  }
+
+  export interface Config {
+    apiKey?: string;
+    model?: string;
+    isReconfiguring?: boolean;
+  }
+}
+
+/**
+ * Azure setup configuration types
+ */
+export namespace AzureSetup {
+  export interface SetupOptions {
+    checkOnly?: boolean;
+    interactive?: boolean;
+  }
+
+  export interface SetupArgv {
+    check?: boolean;
+    nonInteractive?: boolean;
+  }
+
+  export interface Config {
+    apiKey?: string;
+    endpoint?: string;
+    deploymentName?: string;
+    apiVersion?: string;
+    model?: string;
+    isReconfiguring?: boolean;
+  }
+}
+
+/**
+ * AWS Bedrock setup configuration types
+ */
+export namespace BedrockSetup {
+  export interface SetupOptions {
+    checkOnly?: boolean;
+    interactive?: boolean;
+  }
+
+  export interface SetupArgv {
+    check?: boolean;
+    nonInteractive?: boolean;
+  }
+
+  export interface ConfigData {
+    region?: string;
+    accessKeyId?: string;
+    secretAccessKey?: string;
+    model?: string;
+  }
+
+  export interface ConfigStatus {
+    hasCredentials: boolean;
+    hasRegion: boolean;
+    hasModel: boolean;
+    isReconfiguring?: boolean;
+  }
+}
+
+/**
+ * GCP/Vertex AI setup configuration types
+ */
+export namespace GCPSetup {
+  export interface SetupOptions {
+    checkOnly?: boolean;
+    interactive?: boolean;
+  }
+
+  export interface SetupArgv {
+    check?: boolean;
+    nonInteractive?: boolean;
+  }
+
+  export interface AuthMethodStatus {
+    hasServiceAccount: boolean;
+    hasGcloudAuth: boolean;
+    hasApplicationDefault: boolean;
+    preferredMethod?: "service-account" | "gcloud" | "adc";
+  }
+}
+
+/**
+ * Hugging Face setup configuration types
+ */
+export namespace HuggingFaceSetup {
+  export interface SetupArgs {
+    check?: boolean;
+    nonInteractive?: boolean;
+    help?: boolean;
+  }
+}
+
+/**
+ * Mistral setup configuration types
+ */
+export namespace MistralSetup {
+  export interface SetupArgs {
+    check?: boolean;
+    nonInteractive?: boolean;
+    help?: boolean;
+  }
 }

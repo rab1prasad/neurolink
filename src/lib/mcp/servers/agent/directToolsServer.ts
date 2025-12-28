@@ -6,7 +6,10 @@
 import type { Unknown, UnknownRecord } from "../../../types/common.js";
 import { z } from "zod";
 import { createMCPServer } from "../../factory.js";
-import type { NeuroLinkExecutionContext, ToolResult } from "../../factory.js";
+import type {
+  NeuroLinkExecutionContext,
+  ToolResult,
+} from "../../../types/mcpTypes.js";
 import { directAgentTools } from "../../../agent/directTools.js";
 import { logger } from "../../../utils/logger.js";
 import { shouldDisableBuiltinTools } from "../../../utils/toolUtils.js";
@@ -28,6 +31,14 @@ export const directToolsServer = createMCPServer({
  */
 if (!shouldDisableBuiltinTools()) {
   Object.entries(directAgentTools).forEach(([toolName, toolDef]) => {
+    // Skip undefined tools
+    if (!toolDef) {
+      logger.warn(
+        `Skipping undefined tool during direct tools server registration: ${toolName}`,
+      );
+      return;
+    }
+
     // The toolDef is a Vercel AI SDK Tool object
     // Extract properties from the Tool object
     const toolSpec = (toolDef as UnknownRecord)._spec || toolDef;
@@ -60,12 +71,26 @@ if (!shouldDisableBuiltinTools()) {
         const startTime = Date.now();
 
         try {
-          logger.debug(
-            `[Direct Tools] Executing ${toolName} with params:`,
-            params,
-          );
+          if (Object.keys(params || {}).length === 0) {
+            return {
+              success: false,
+              data: null,
+              error:
+                "Tool execution blocked: Empty parameters not allowed during startup",
+              usage: {
+                executionTime: Date.now() - startTime,
+              },
+              metadata: {
+                toolName,
+                serverId: "neurolink-direct",
+                sessionId: context.sessionId,
+                blocked: true,
+                reason: "empty_parameters_startup_prevention",
+                timestamp: Date.now(),
+              },
+            };
+          }
 
-          // Execute the direct tool
           if (!execute || typeof execute !== "function") {
             throw new Error(`Tool ${toolName} has no execute function`);
           }
@@ -124,7 +149,7 @@ if (!shouldDisableBuiltinTools()) {
     });
   });
 } else {
-  logger.info("[Direct Tools] Built-in tools disabled via configuration");
+  logger.debug("Built-in tools disabled via configuration");
 }
 
 /**
@@ -139,22 +164,10 @@ function getToolCategory(toolName: string): string {
     case "readFile":
     case "writeFile":
     case "listDirectory":
-    case "searchFiles":
       return "filesystem";
     case "websearchGrounding":
       return "search";
     default:
       return "utility";
   }
-}
-
-// Log successful registration or disable status
-if (!shouldDisableBuiltinTools()) {
-  logger.info(
-    `[Direct Tools] Registered ${Object.keys(directAgentTools).length} direct tools`,
-  );
-} else {
-  logger.info(
-    "[Direct Tools] 0 direct tools registered (disabled via environment variable)",
-  );
 }

@@ -2,26 +2,22 @@ import { ProviderFactory } from "./providerFactory.js";
 // Lazy loading all providers to avoid circular dependencies
 // Removed all static imports - providers loaded dynamically when needed
 // This breaks the circular dependency chain completely
-import {
-  AIProviderName,
-  GoogleAIModels,
-  OpenAIModels,
-} from "../types/index.js";
+import type { ProviderRegistryOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import type { UnknownRecord } from "../types/common.js";
 import type { NeuroLink } from "../neurolink.js";
 import type { MistralProvider as MistralProviderType } from "@ai-sdk/mistral";
-
-/**
- * Configuration options for the provider registry
- */
-export interface ProviderRegistryOptions {
-  /**
-   * Enable loading of manual MCP configurations from .mcp-config.json
-   * Should only be true for CLI mode, false for SDK mode
-   */
-  enableManualMCP?: boolean;
-}
+import {
+  AIProviderName,
+  GoogleAIModels,
+  OpenAIModels,
+  AnthropicModels,
+  VertexModels,
+  MistralModels,
+  OllamaModels,
+  LiteLLMModels,
+  HuggingFaceModels,
+} from "../constants/enums.js";
 
 /**
  * Provider Registry - registers all providers with the factory
@@ -62,7 +58,7 @@ export class ProviderRegistry {
           );
         },
         GoogleAIModels.GEMINI_2_5_FLASH,
-        ["googleAiStudio", "google", "gemini", "google-ai"],
+        ["googleAiStudio", "google", "gemini", "google-ai", "google-ai-studio"],
       );
 
       // Register OpenAI provider
@@ -93,7 +89,7 @@ export class ProviderRegistry {
           );
           return new AnthropicProvider(modelName, sdk as NeuroLink | undefined);
         },
-        "claude-3-5-sonnet-20241022",
+        AnthropicModels.CLAUDE_SONNET_4_0,
         ["claude", "anthropic"],
       );
 
@@ -104,6 +100,7 @@ export class ProviderRegistry {
           modelName?: string,
           _providerName?: string,
           sdk?: UnknownRecord,
+          region?: string,
         ) => {
           const { AmazonBedrockProvider } = await import(
             "../providers/amazonBedrock.js"
@@ -111,6 +108,7 @@ export class ProviderRegistry {
           return new AmazonBedrockProvider(
             modelName,
             sdk as NeuroLink | undefined,
+            region,
           );
         },
         undefined, // Let provider read BEDROCK_MODEL from .env
@@ -120,11 +118,18 @@ export class ProviderRegistry {
       // Register Azure OpenAI provider
       ProviderFactory.registerProvider(
         AIProviderName.AZURE,
-        async (modelName?: string) => {
+        async (
+          modelName?: string,
+          _providerName?: string,
+          sdk?: UnknownRecord,
+        ) => {
           const { AzureOpenAIProvider } = await import(
             "../providers/azureOpenai.js"
           );
-          return new AzureOpenAIProvider(modelName);
+          return new AzureOpenAIProvider(
+            modelName,
+            sdk as NeuroLink | undefined,
+          );
         },
         process.env.AZURE_MODEL ||
           process.env.AZURE_OPENAI_MODEL ||
@@ -141,6 +146,7 @@ export class ProviderRegistry {
           modelName?: string,
           providerName?: string,
           sdk?: UnknownRecord,
+          region?: string,
         ) => {
           const { GoogleVertexProvider } = await import(
             "../providers/googleVertex.js"
@@ -149,9 +155,10 @@ export class ProviderRegistry {
             modelName,
             providerName,
             sdk as NeuroLink | undefined,
+            region,
           );
         },
-        "claude-sonnet-4@20250514",
+        VertexModels.CLAUDE_4_0_SONNET,
         ["vertex", "googleVertex"],
       );
 
@@ -164,7 +171,8 @@ export class ProviderRegistry {
           );
           return new HuggingFaceProvider(modelName);
         },
-        process.env.HUGGINGFACE_MODEL || "microsoft/DialoGPT-medium",
+        process.env.HUGGINGFACE_MODEL ||
+          HuggingFaceModels.QWEN_2_5_72B_INSTRUCT,
         ["huggingface", "hf"],
       );
 
@@ -182,7 +190,7 @@ export class ProviderRegistry {
             sdk as MistralProviderType | undefined,
           );
         },
-        "mistral-large-latest",
+        MistralModels.MISTRAL_LARGE_LATEST,
         ["mistral"],
       );
 
@@ -193,7 +201,7 @@ export class ProviderRegistry {
           const { OllamaProvider } = await import("../providers/ollama.js");
           return new OllamaProvider(modelName);
         },
-        process.env.OLLAMA_MODEL || "llama3.1:8b",
+        process.env.OLLAMA_MODEL || OllamaModels.LLAMA3_2_LATEST,
         ["ollama", "local"],
       );
 
@@ -208,7 +216,7 @@ export class ProviderRegistry {
           const { LiteLLMProvider } = await import("../providers/litellm.js");
           return new LiteLLMProvider(modelName, sdk as NeuroLink | undefined);
         },
-        process.env.LITELLM_MODEL || "openai/gpt-4o-mini",
+        process.env.LITELLM_MODEL || LiteLLMModels.OPENAI_GPT_4O_MINI,
         ["litellm"],
       );
 
@@ -239,11 +247,12 @@ export class ProviderRegistry {
           modelName?: string,
           _providerName?: string,
           _sdk?: UnknownRecord,
+          region?: string,
         ) => {
           const { AmazonSageMakerProvider } = await import(
             "../providers/amazonSagemaker.js"
           );
-          return new AmazonSageMakerProvider(modelName);
+          return new AmazonSageMakerProvider(modelName, undefined, region);
         },
         process.env.SAGEMAKER_MODEL || "sagemaker-model",
         ["sagemaker", "aws-sagemaker"],
@@ -251,6 +260,32 @@ export class ProviderRegistry {
 
       logger.debug("All providers registered successfully");
       this.registered = true;
+
+      // ===== TTS HANDLER REGISTRATION =====
+      try {
+        // Create handler instance and register explicitly
+        const { GoogleTTSHandler } = await import(
+          "../adapters/tts/googleTTSHandler.js"
+        );
+        const { TTSProcessor } = await import("../utils/ttsProcessor.js");
+
+        const googleHandler = new GoogleTTSHandler();
+        TTSProcessor.registerHandler("google-ai", googleHandler);
+        TTSProcessor.registerHandler("vertex", googleHandler);
+
+        logger.debug("TTS handlers registered successfully", {
+          providers: ["google-ai", "vertex"],
+        });
+      } catch (ttsError) {
+        logger.warn(
+          "Failed to register TTS handlers - TTS functionality will be unavailable",
+          {
+            error:
+              ttsError instanceof Error ? ttsError.message : String(ttsError),
+          },
+        );
+        // Don't throw - TTS is optional functionality
+      }
     } catch (error) {
       logger.error("Failed to register providers:", error);
       throw error;

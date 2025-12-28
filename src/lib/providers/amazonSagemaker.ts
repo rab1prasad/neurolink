@@ -7,7 +7,7 @@
 
 import type { ZodType, ZodTypeDef } from "zod";
 import type { Schema, LanguageModelV1 } from "ai";
-import type { AIProviderName } from "../types/index.js";
+import { AIProviderName } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import type { ConnectivityResult } from "../types/typeAliases.js";
 import { BaseProvider } from "../core/baseProvider.js";
@@ -25,7 +25,7 @@ import { SageMakerLanguageModel } from "./sagemaker/language-model.js";
 import type {
   SageMakerConfig,
   SageMakerModelConfig,
-} from "./sagemaker/types.js";
+} from "../types/providers.js";
 
 /**
  * Amazon SageMaker Provider extending BaseProvider
@@ -35,12 +35,12 @@ export class AmazonSageMakerProvider extends BaseProvider {
   private sagemakerConfig: SageMakerConfig;
   private modelConfig: SageMakerModelConfig;
 
-  constructor(modelName?: string, endpointName?: string) {
+  constructor(modelName?: string, endpointName?: string, region?: string) {
     super(modelName, "sagemaker" as AIProviderName);
 
     try {
       // Load and validate configuration
-      this.sagemakerConfig = getSageMakerConfig();
+      this.sagemakerConfig = getSageMakerConfig(region);
       this.modelConfig = getSageMakerModelConfig(
         endpointName || getDefaultSageMakerEndpoint(),
       );

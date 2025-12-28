@@ -14,8 +14,8 @@
 
 ---
 
-**Version**: v1.7.1
-**Last Updated**: January 7, 2025
+**Version**: v7.47.0
+**Last Updated**: September 26, 2025
 
 ---
 
@@ -23,12 +23,48 @@
 
 This guide helps diagnose and resolve common issues with NeuroLink, including AI provider connectivity, MCP integration, CLI usage problems, and the new generate function migration.
 
+## 🚀 New in v7.47 – Quick Fixes
+
+| Symptom                                | Resolution                                                                                                                     |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `Image not found` when using `--image` | Provide an absolute path or run the command from the directory containing the asset. URLs must be HTTPS.                       |
+| `Evaluation model not configured`      | Set `NEUROLINK_EVALUATION_PROVIDER`/`NEUROLINK_EVALUATION_MODEL`, or disable `--enableEvaluation` until credentials are added. |
+| `Redis connection failed` in loop mode | Export `REDIS_URL` before running `neurolink loop` or start the session with `--no-auto-redis`.                                |
+| `Model not available in region`        | Confirm the model supports the requested region and update `AWS_REGION` / `GOOGLE_VERTEX_LOCATION` accordingly.                |
+| CLI exits after error inside loop      | Upgrade to `@juspay/neurolink@>=7.47.0` and restart the loop; new builds catch errors without exiting.                         |
+
+## 🆕 Q4 2025 Features – Common Issues
+
+### Human-in-the-Loop (HITL)
+
+| Issue                                   | Solution                                                                                                  |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Tool executes without asking permission | Add `requiresConfirmation: true` to tool definition → See [HITL Guide](features/hitl.md#configuration)    |
+| Confirmation dialog doesn't appear      | Handle `USER_CONFIRMATION_REQUIRED` error in your UI → See [HITL Guide](features/hitl.md#troubleshooting) |
+| Permission flag not resetting           | Call `setUserConfirmation(false)` after tool execution → See [HITL Guide](features/hitl.md#how-it-works)  |
+
+### Guardrails Middleware
+
+| Issue                      | Solution                                                                                                             |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Content not being filtered | Ensure `preset: "security"` is set in middleware config → See [Guardrails Guide](features/guardrails.md#quick-start) |
+| Too many false positives   | Review bad word list, remove common words → See [Guardrails Guide](features/guardrails.md#best-practices)            |
+| Model-based filter is slow | Switch to `gpt-4o-mini` for faster filtering → See [Guardrails Guide](features/guardrails.md#troubleshooting)        |
+
+### Redis Conversation Export
+
+| Issue                                        | Solution                                                                                                                                    |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Export returns empty history                 | Verify Redis connection and session ID exists → See [Conversation History Guide](features/conversation-history.md#troubleshooting)          |
+| `exportConversationHistory` method not found | Ensure `conversationMemory.store: "redis"` is configured → See [Conversation History Guide](features/conversation-history.md#configuration) |
+| Missing metadata in export                   | Set `includeMetadata: true` in export options → See [Conversation History Guide](features/conversation-history.md#advanced-usage)           |
+
 ## 🎯 **Generate Function Migration Issues**
 
 ### **Migration Questions**
 
 **Q: Should I update my existing code to use the new `generate()` API?**
-A: Optional. Your existing legacy `generate()` code continues working unchanged. Prefer the new `generate()` API for new projects.
+A: Optional. Your existing legacy `generate()` code continues working unchanged. Prefer the new `stream()` API for new projects.
 
 **Q: What's the difference between the new `generate()` and the legacy `generate()`?**
 A: The new `generate()` has a more extensible interface for future multi‑modal features. Both produce identical results for text generation today.
@@ -891,6 +927,111 @@ node dist/cli/index.js generate "what is deepest you can think?" --provider goog
 
 ---
 
+## 🤖 **Structured Output Issues**
+
+### **Google Gemini: Function Calling + Schema Conflict**
+
+**Symptom**: Error when using schema with Google Vertex AI or Google AI Studio
+
+```
+Error: Function calling with a response mime type: 'application/json' is unsupported
+```
+
+**Root Cause**: Google's Gemini API **fundamentally cannot combine function calling (tools) with structured output (JSON schema)**. This is a documented Google API limitation, not a NeuroLink bug.
+
+**Solutions**:
+
+1. **Disable Tools (Recommended)**:
+
+   ```typescript
+   const result = await neurolink.generate({
+     input: { text: "Your prompt" },
+     schema: YourSchema,
+     output: { format: "json" },
+     provider: "vertex", // or "google-ai"
+     disableTools: true, // ✅ Required for Google with schemas
+   });
+   ```
+
+2. **Use Different Provider**:
+
+   ```typescript
+   // OpenAI, Anthropic, and others support both simultaneously
+   const result = await neurolink.generate({
+     input: { text: "Your prompt" },
+     schema: YourSchema,
+     output: { format: "json" },
+     provider: "openai", // ✅ Supports tools + schemas together
+   });
+   ```
+
+3. **Use Future Gemini Versions**:
+   - Future Gemini versions may support both - check official documentation for updates
+
+**This is Industry Standard**: All frameworks (LangChain, Vercel AI SDK, Agno, Instructor) use the same workaround.
+
+**Historical Context**:
+
+- Gemini 2.0 and earlier: Cannot combine tools + schemas
+- Gemini 2.5: **Worsened** - even fails with tool calls in conversation history
+- Gemini 3 Pro Preview: Finally supports both
+
+---
+
+### **Google Gemini: "Too many states for serving" Error**
+
+**Symptom**: Error with complex Zod schemas on Google providers
+
+```
+Error: 9 FAILED_PRECONDITION: Too many states for serving
+```
+
+**Root Cause**: Google Gemini has internal state limits. Complex schemas + many tools exceed these limits.
+
+**Solutions**:
+
+1. **Simplify Schema**:
+
+   ```typescript
+   // ❌ Too complex
+   const ComplexSchema = z.object({
+     level1: z.object({
+       level2: z.object({
+         level3: z.object({
+           level4: z.object({
+             level5: z.string()
+           })
+         })
+       })
+     }),
+     largeArray: z.array(z.object({...})).max(1000)
+   });
+
+   // ✅ Simplified
+   const SimpleSchema = z.object({
+     summary: z.string(),
+     details: z.object({
+       key1: z.string(),
+       key2: z.number()
+     })
+   });
+   ```
+
+2. **Disable Tools** (reduces state complexity):
+
+   ```typescript
+   const result = await neurolink.generate({
+     schema: YourSchema,
+     disableTools: true, // ✅ Significantly reduces state count
+   });
+   ```
+
+3. **Use Different Provider**:
+   - OpenAI: No known schema complexity limits
+   - Anthropic: Handles deep nested schemas well
+
+---
+
 ## 🧪 **Testing and Validation**
 
 ### **Comprehensive System Test**
@@ -1064,7 +1205,6 @@ curl -I --proxy $HTTPS_PROXY https://api.openai.com
 **Solutions**:
 
 1. **Contact IT team** for allowlist:
-
    - `generativelanguage.googleapis.com` (Google AI)
    - `api.anthropic.com` (Anthropic)
    - `api.openai.com` (OpenAI)
@@ -1204,10 +1344,10 @@ npx @juspay/neurolink sagemaker list-endpoints
 
 ## 📚 **Additional Resources**
 
-- **[MCP Integration Guide](./MCP-INTEGRATION.md)** - Complete MCP setup and usage
-- **[CLI Guide](./CLI-GUIDE.md)** - Comprehensive CLI documentation
-- **[API Reference](./API-REFERENCE.md)** - Complete API documentation
-- **[Configuration Guide](./CONFIGURATION.md)** - Environment and setup guide
+- **[MCP Integration Guide](MCP-INTEGRATION.md)** - Complete MCP setup and usage
+- **[CLI Guide](CLI-GUIDE.md)** - Comprehensive CLI documentation
+- **[API Reference](API-REFERENCE.md)** - Complete API documentation
+- **[Configuration Guide](CONFIGURATION.md)** - Environment and setup guide
 
 ---
 

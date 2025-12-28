@@ -9,6 +9,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { logger } from "../utils/logger.js";
 import { VertexAI } from "@google-cloud/vertexai";
+import { CSVProcessor } from "../utils/csvProcessor.js";
 
 // Runtime Google Search tool creation - bypasses TypeScript strict typing
 function createGoogleSearchTools() {
@@ -33,7 +34,7 @@ export const directAgentTools = {
         .string()
         .optional()
         .describe(
-          'Timezone (e.g., "America/New_York", "Asia/Kolkata"). Defaults to local time.',
+          'Timezone (e.g., "America/New_York", "Asia/Kolkata"). Defaults to system local time.',
         ),
     }),
     execute: async ({ timezone }) => {
@@ -109,8 +110,8 @@ export const directAgentTools = {
       includeHidden: z
         .boolean()
         .optional()
-        .describe("Include hidden files (starting with .)")
-        .default(false),
+        .default(false)
+        .describe("Include hidden files (starting with .)"),
     }),
     execute: async ({ path: dirPath, includeHidden }) => {
       try {
@@ -296,93 +297,367 @@ export const directAgentTools = {
     },
   }),
 
-  searchFiles: tool({
-    description: "Search for files by name pattern in a directory",
-    parameters: z.object({
-      directory: z.string().describe("Directory to search in"),
-      pattern: z
-        .string()
-        .describe(
-          "File name pattern to search for (supports wildcards like *.js)",
-        ),
-      recursive: z
-        .boolean()
-        .optional()
-        .default(true)
-        .describe("Search recursively in subdirectories"),
-    }),
-    execute: async ({ directory, pattern, recursive }) => {
-      try {
-        const resolvedDir = path.resolve(directory);
+  // NOTE: searchFiles was removed to avoid naming conflict with external MCP 'search_files' tool
+  // from @modelcontextprotocol/server-filesystem which provides the same functionality
+  // with parameters {path, pattern, excludePatterns}
 
-        if (!fs.existsSync(resolvedDir)) {
+  analyzeCSV: tool({
+    description:
+      "Analyze CSV file for accurate counting, aggregation, and statistical analysis. Use this for precise data operations like counting rows by column, calculating sums/averages, finding min/max values, etc. The tool reads the file directly - do NOT pass CSV content.",
+    parameters: z.object({
+      filePath: z
+        .string()
+        .refine(
+          (inputPath) => {
+            const resolvedPath = path.resolve(inputPath);
+            const normalizedPath = resolvedPath
+              .toLowerCase()
+              .replace(/\\/g, "/");
+
+            const sensitivePatterns = [
+              "/etc/",
+              "/sys/",
+              "/proc/",
+              "/dev/",
+              "/root/",
+              "/.ssh/",
+              "/private/etc/",
+              "/private/var/",
+              "c:/windows/",
+              "c:/program files/",
+              "c:/programdata/",
+            ];
+
+            return !sensitivePatterns.some((pattern) =>
+              normalizedPath.startsWith(pattern),
+            );
+          },
+          {
+            message:
+              "Invalid file path: access to system directories is not allowed",
+          },
+        )
+        .describe(
+          "Path to the CSV file to analyze (e.g., 'test/data.csv' or '/absolute/path/file.csv')",
+        ),
+      operation: z
+        .enum([
+          "count_by_column",
+          "sum_by_column",
+          "average_by_column",
+          "min_max_by_column",
+          "describe",
+        ])
+        .describe("Type of analysis to perform"),
+      column: z
+        .string()
+        .optional()
+        .default("")
+        .describe(
+          "Column name for the operation (required for most operations)",
+        ),
+      maxRows: z
+        .number()
+        .optional()
+        .default(1000)
+        .describe("Maximum rows to process (default: 1000)"),
+    }),
+    execute: async ({ filePath, operation, column, maxRows = 1000 }) => {
+      const startTime = Date.now();
+      logger.info(
+        `[analyzeCSV] 🚀 START: file=${filePath}, operation=${operation}, column=${column}, maxRows=${maxRows}`,
+      );
+
+      try {
+        // Resolve file path
+        logger.debug(`[analyzeCSV] Resolving file: ${filePath}`);
+        const path = await import("path");
+
+        // Resolve path (support both relative and absolute)
+        const resolvedPath = path.isAbsolute(filePath)
+          ? filePath
+          : path.resolve(process.cwd(), filePath);
+
+        logger.debug(`[analyzeCSV] Resolved path: ${resolvedPath}`);
+
+        // Parse CSV using streaming from disk (memory efficient)
+        logger.info(
+          `[analyzeCSV] Starting CSV parsing (max ${maxRows} rows)...`,
+        );
+        const rows = (await CSVProcessor.parseCSVFile(
+          resolvedPath,
+          maxRows,
+        )) as Array<Record<string, string>>;
+        logger.info(
+          `[analyzeCSV] ✅ CSV parsing complete: ${rows.length} rows`,
+        );
+
+        if (rows.length === 0) {
+          logger.warn(`[analyzeCSV] No data rows found`);
           return {
             success: false,
-            error: `Directory does not exist: ${resolvedDir}`,
+            error: "No data rows found in CSV",
           };
         }
 
-        const matches: Array<{
-          name: string;
-          path: string;
-          size: number;
-          lastModified: string;
-        }> = [];
+        // Log column names
+        const columnNames = rows.length > 0 ? Object.keys(rows[0]) : [];
+        logger.info(
+          `[analyzeCSV] Found ${rows.length} rows with columns:`,
+          columnNames,
+        );
+        logger.info(`[analyzeCSV] Executing operation: ${operation}`);
+        let result: unknown;
 
-        const searchDir = (dir: string, depth = 0) => {
-          if (!recursive && depth > 0) {
-            return;
-          }
+        switch (operation) {
+          case "count_by_column": {
+            logger.info(`[analyzeCSV] count_by_column: column=${column}`);
+            if (!column) {
+              return {
+                success: false,
+                error: "Column name required for count_by_column operation",
+              };
+            }
 
-          const items = fs.readdirSync(dir);
-
-          for (const item of items) {
-            const itemPath = path.join(dir, item);
-            const stats = fs.statSync(itemPath);
-
-            if (stats.isDirectory()) {
-              if (recursive && depth < 10) {
-                // Prevent infinite recursion
-                searchDir(itemPath, depth + 1);
-              }
-            } else if (stats.isFile()) {
-              // Simple pattern matching (convert * to regex)
-              const regexPattern = pattern
-                .replace(/\*/g, ".*")
-                .replace(/\?/g, ".");
-              const regex = new RegExp(`^${regexPattern}$`, "i");
-
-              if (regex.test(item)) {
-                matches.push({
-                  name: item,
-                  path: itemPath,
-                  size: stats.size,
-                  lastModified: stats.mtime.toISOString(),
-                });
+            // Count occurrences of each value in the column
+            const counts: Record<string, number> = {};
+            logger.debug(`[analyzeCSV] Counting rows...`);
+            for (const row of rows) {
+              const value = row[column];
+              if (value !== undefined) {
+                counts[value] = (counts[value] || 0) + 1;
               }
             }
+            logger.debug(
+              `[analyzeCSV] Found ${Object.keys(counts).length} unique values`,
+            );
+
+            // Sort by count descending
+            logger.debug(`[analyzeCSV] Sorting results...`);
+            result = Object.fromEntries(
+              Object.entries(counts).sort(([, a], [, b]) => b - a),
+            );
+            logger.info(
+              `[analyzeCSV] ✅ count_by_column complete. Result:`,
+              result,
+            );
+            break;
           }
-        };
 
-        searchDir(resolvedDir);
+          case "sum_by_column": {
+            logger.info(`[analyzeCSV] sum_by_column: column=${column}`);
+            if (!column) {
+              return {
+                success: false,
+                error: "Column name required for sum_by_column operation",
+              };
+            }
 
-        return {
+            // Sum numeric values from the target column itself for each group
+            const groups: Record<string, number> = {};
+            logger.debug(
+              `[analyzeCSV] Grouping and summing ${rows.length} rows...`,
+            );
+            let processedRows = 0;
+            let totalNumericValuesFound = 0;
+
+            for (const row of rows) {
+              const key = row[column];
+              if (!key) {
+                continue;
+              }
+
+              // Parse numeric value from the target column
+              const value = row[column];
+              if (value === undefined || value === null || value === "") {
+                continue;
+              }
+
+              const num = parseFloat(value);
+              if (isNaN(num)) {
+                continue;
+              }
+
+              if (!groups[key]) {
+                groups[key] = 0;
+              }
+              groups[key] += num;
+              totalNumericValuesFound++;
+
+              processedRows++;
+              if (processedRows % 10 === 0) {
+                logger.debug(
+                  `[analyzeCSV] Processed ${processedRows}/${rows.length} rows`,
+                );
+              }
+            }
+
+            // Fail fast if no numeric data found in the requested column
+            if (totalNumericValuesFound === 0) {
+              return {
+                success: false,
+                error: `No numeric data found in column "${column}" for sum_by_column operation`,
+              };
+            }
+
+            logger.debug(
+              `[analyzeCSV] Calculated sums for ${Object.keys(groups).length} groups (${totalNumericValuesFound} numeric values)`,
+            );
+
+            result = groups;
+            logger.info(`[analyzeCSV] ✅ sum_by_column complete`);
+            break;
+          }
+
+          case "average_by_column": {
+            logger.info(`[analyzeCSV] average_by_column: column=${column}`);
+            if (!column) {
+              return {
+                success: false,
+                error: "Column name required for average_by_column operation",
+              };
+            }
+
+            // Average numeric values from the target column itself for each group
+            const groups: Record<string, { sum: number; count: number }> = {};
+            logger.debug(
+              `[analyzeCSV] Grouping and averaging ${rows.length} rows...`,
+            );
+            let processedRows = 0;
+            let totalNumericValuesFound = 0;
+
+            for (const row of rows) {
+              const key = row[column];
+              if (!key) {
+                continue;
+              }
+
+              // Parse numeric value from the target column
+              const value = row[column];
+              if (value === undefined || value === null || value === "") {
+                continue;
+              }
+
+              const num = parseFloat(value);
+              if (isNaN(num)) {
+                continue;
+              }
+
+              if (!groups[key]) {
+                groups[key] = { sum: 0, count: 0 };
+              }
+              groups[key].sum += num;
+              groups[key].count++;
+              totalNumericValuesFound++;
+
+              processedRows++;
+              if (processedRows % 10 === 0) {
+                logger.debug(
+                  `[analyzeCSV] Processed ${processedRows}/${rows.length} rows`,
+                );
+              }
+            }
+
+            // Fail fast if no numeric data found in the requested column
+            if (totalNumericValuesFound === 0) {
+              return {
+                success: false,
+                error: `No numeric data found in column "${column}" for average_by_column operation`,
+              };
+            }
+
+            logger.debug(
+              `[analyzeCSV] Calculated averages for ${Object.keys(groups).length} groups (${totalNumericValuesFound} numeric values)`,
+            );
+
+            result = Object.fromEntries(
+              Object.entries(groups).map(([k, v]) => [
+                k,
+                v.count > 0 ? v.sum / v.count : 0,
+              ]),
+            );
+            logger.info(`[analyzeCSV] ✅ average_by_column complete`);
+            break;
+          }
+
+          case "min_max_by_column": {
+            if (!column) {
+              return {
+                success: false,
+                error: "Column name required for min_max_by_column operation",
+              };
+            }
+
+            const values = rows
+              .map((row) => row[column])
+              .filter((v) => v !== undefined && v !== "");
+
+            const numericValues = values
+              .map((v) => parseFloat(v))
+              .filter((n) => !isNaN(n));
+
+            if (numericValues.length === 0) {
+              return {
+                success: false,
+                error: `No numeric data found in column "${column}" for min_max_by_column operation`,
+              };
+            }
+
+            result = {
+              min: Math.min(...numericValues),
+              max: Math.max(...numericValues),
+              numericCount: numericValues.length,
+              totalCount: values.length,
+            };
+            break;
+          }
+
+          case "describe": {
+            const columnNames = rows.length > 0 ? Object.keys(rows[0]) : [];
+            result = {
+              total_rows: rows.length,
+              columns: columnNames,
+              column_count: columnNames.length,
+            };
+            break;
+          }
+
+          default:
+            return {
+              success: false,
+              error: `Unknown operation: ${operation}`,
+            };
+        }
+
+        const duration = Date.now() - startTime;
+        logger.info(
+          `[analyzeCSV] 🏁 COMPLETE: ${operation} took ${duration}ms`,
+        );
+
+        const response = {
           success: true,
-          directory: resolvedDir,
-          pattern,
-          matches,
-          count: matches.length,
+          operation,
+          column,
+          result: JSON.stringify(result, null, 2),
+          rowCount: rows.length,
         };
+
+        logger.debug(
+          `[analyzeCSV] 📤 RETURNING TO LLM:`,
+          JSON.stringify(response, null, 2),
+        );
+        return response;
       } catch (error) {
         return {
           success: false,
           error: error instanceof Error ? error.message : String(error),
-          directory,
-          pattern,
+          operation,
+          column,
         };
       }
     },
   }),
+
   websearchGrounding: tool({
     description:
       "Search the web for current information using Google Search grounding. Returns raw search data for AI processing.",
@@ -539,7 +814,6 @@ export type FilesystemToolsMap = {
   readFile: typeof directAgentTools.readFile;
   listDirectory: typeof directAgentTools.listDirectory;
   writeFile: typeof directAgentTools.writeFile;
-  searchFiles: typeof directAgentTools.searchFiles;
 };
 
 export type UtilityToolsMap = {
@@ -576,7 +850,6 @@ export function getToolsForCategory(
         readFile: directAgentTools.readFile,
         listDirectory: directAgentTools.listDirectory,
         writeFile: directAgentTools.writeFile,
-        searchFiles: directAgentTools.searchFiles,
       };
     case "utility":
       return {

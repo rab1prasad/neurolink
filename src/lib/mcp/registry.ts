@@ -2,31 +2,10 @@
  * MCP Registry - Industry Standard Interface with camelCase
  */
 
-import type {
-  DiscoveredMcp,
-  ExecutionContext,
-  ToolInfo,
-} from "./contracts/mcpContract.js";
+import type { DiscoveredMcp, McpRegistry } from "../types/mcpTypes.js";
+import type { ToolInfo, ExecutionContext } from "../types/tools.js";
 import type { UnknownRecord } from "../types/common.js";
 import { registryLogger } from "../utils/logger.js";
-
-/**
- * MCP Registry interface with optional methods for maximum flexibility
- */
-export interface McpRegistry {
-  // All methods optional (maximum flexibility)
-  registerServer?(
-    serverId: string,
-    serverConfig?: unknown,
-    context?: ExecutionContext,
-  ): Promise<void>;
-  executeTool?<T = unknown>(
-    toolName: string,
-    args?: unknown,
-    context?: ExecutionContext,
-  ): Promise<T>;
-  listTools?(context?: ExecutionContext): Promise<ToolInfo[]>;
-}
 
 /**
  * Simple MCP registry for plugin management
@@ -40,7 +19,7 @@ export class MCPRegistry implements McpRegistry {
    */
   register(plugin: DiscoveredMcp): void {
     this.plugins.set(plugin.metadata.name, plugin);
-    registryLogger.info(`Registered plugin: ${plugin.metadata.name}`);
+    registryLogger.debug(`Registered plugin: ${plugin.metadata.name}`);
   }
 
   /**
@@ -49,7 +28,7 @@ export class MCPRegistry implements McpRegistry {
   unregister(name: string): boolean {
     const removed = this.plugins.delete(name);
     if (removed) {
-      registryLogger.info(`Unregistered plugin: ${name}`);
+      registryLogger.debug(`Unregistered plugin: ${name}`);
     }
     return removed;
   }

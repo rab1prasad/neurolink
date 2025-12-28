@@ -1,3 +1,463 @@
+## [8.23.2](https://github.com/juspay/neurolink/compare/v8.23.1...v8.23.2) (2025-12-27)
+
+### Bug Fixes
+
+- **(format):** Add format validation to PDF image conversion ([bdd3285](https://github.com/juspay/neurolink/commit/bdd32855daa25d1e0fd1e94db6d97055fd5bd478))
+
+## [8.23.1](https://github.com/juspay/neurolink/compare/v8.23.0...v8.23.1) (2025-12-24)
+
+### Bug Fixes
+
+- **(mcp):** Added Blocked Tool Support ([852d079](https://github.com/juspay/neurolink/commit/852d079371878d2a808ef6c0dc76103eb1d13a83))
+
+## [8.23.0](https://github.com/juspay/neurolink/compare/v8.22.0...v8.23.0) (2025-12-23)
+
+### Features
+
+- **(csv):** add file extension field to CSV metadata ([044030c](https://github.com/juspay/neurolink/commit/044030c3be74121729477475becd983840e8f87c))
+
+## [8.22.0](https://github.com/juspay/neurolink/compare/v8.21.0...v8.22.0) (2025-12-23)
+
+### Features
+
+- **(ci):** Add ffmpeg installation and verification to CI/CD pipeline ([1b0d669](https://github.com/juspay/neurolink/commit/1b0d669e5ee3d33f58dcfe71ddcc9bb8faf5b892))
+
+## [8.21.0](https://github.com/juspay/neurolink/compare/v8.20.1...v8.21.0) (2025-12-22)
+
+### Features
+
+- **(types):** Add office document type definitions and comprehensive tests ([1b34d3d](https://github.com/juspay/neurolink/commit/1b34d3de8114bdc56600cc785e7e52aa1af1ddc7))
+
+## [8.20.1](https://github.com/juspay/neurolink/compare/v8.20.0...v8.20.1) (2025-12-22)
+
+### Bug Fixes
+
+- **(Validation):** implement secure base64 validation with fail-fast checks ([f1b9b9c](https://github.com/juspay/neurolink/commit/f1b9b9c105db38ce439a5e69ff343b77b12be174)), closes [#277](https://github.com/juspay/neurolink/issues/277)
+
+## [8.20.0](https://github.com/juspay/neurolink/compare/v8.19.1...v8.20.0) (2025-12-22)
+
+### Features
+
+- **(memory):** Implement token based summarization ([ffdc902](https://github.com/juspay/neurolink/commit/ffdc902f534c97a5aff38d7de419021fcabcd791))
+
+## [8.19.1](https://github.com/juspay/neurolink/compare/v8.19.0...v8.19.1) (2025-12-20)
+
+### Bug Fixes
+
+- **(files):** comprehensive extension-less file detection with fallback parsing (FD-018) ([7e9dbc7](https://github.com/juspay/neurolink/commit/7e9dbc78df48f6df051c7845824977f360f8feee))
+
+## [8.19.0](https://github.com/juspay/neurolink/compare/v8.18.0...v8.19.0) (2025-12-18)
+
+### Features
+
+- **(tts):** Integrate TTS into BaseProvider.generate() ([ffae0b5](https://github.com/juspay/neurolink/commit/ffae0b5be9c4a2ef249876bdeee265004adf28a3))
+
+## [8.18.0](https://github.com/juspay/neurolink/compare/v8.17.0...v8.18.0) (2025-12-16)
+
+### Features
+
+- **(utils):** standardize logging levels in CSVProcessor ([1c348b2](https://github.com/juspay/neurolink/commit/1c348b28d1212cd8ec33eb0100acddaa5a3df2bd))
+
+## [8.17.0](https://github.com/juspay/neurolink/compare/v8.16.0...v8.17.0) (2025-12-16)
+
+### Features
+
+- **(tts):** Add TTS type integration to GenerateOptions, GenerateResult, and StreamChunk ([e290330](https://github.com/juspay/neurolink/commit/e290330e8fe22a4cd0427185cbddbb8856fbd5ca))
+
+## [8.16.0](https://github.com/juspay/neurolink/compare/v8.15.0...v8.16.0) (2025-12-16)
+
+### Features
+
+- **(tts):** Implement GoogleTTSHandler.getVoices() API ([15d39f7](https://github.com/juspay/neurolink/commit/15d39f7e6bfe093971bc822e8f4251b7e8711bb9))
+
+## [8.15.0](https://github.com/juspay/neurolink/compare/v8.14.0...v8.15.0) (2025-12-14)
+
+### Features
+
+- **(tts):** Implement synthesize method in GoogleTTSHandler ([9262e37](https://github.com/juspay/neurolink/commit/9262e37a08ef856eb5d16fd65fa922bd700897cb))
+
+## [8.14.0](https://github.com/juspay/neurolink/compare/v8.13.2...v8.14.0) (2025-12-14)
+
+### Features
+
+- **(tts):** Create GoogleTTSHandler skeleton structure ([60db6a8](https://github.com/juspay/neurolink/commit/60db6a813d350756dad9a7baeee3ff5ad35141e2))
+
+## [8.13.2](https://github.com/juspay/neurolink/compare/v8.13.1...v8.13.2) (2025-12-14)
+
+### Bug Fixes
+
+- **(sdk):** Replace hardcoded timeouts with class constants ([a34c291](https://github.com/juspay/neurolink/commit/a34c29155e82ef4f498714c031401463351171bd))
+
+## [8.13.1](https://github.com/juspay/neurolink/compare/v8.13.0...v8.13.1) (2025-12-13)
+
+### Bug Fixes
+
+- **(provider):** Implement image count limits with validation and warnings ([ff3e27a](https://github.com/juspay/neurolink/commit/ff3e27a5ab3aafffc8312f645e0ebc566600cc63))
+
+## [8.13.0](https://github.com/juspay/neurolink/compare/v8.12.0...v8.13.0) (2025-12-13)
+
+### Features
+
+- **(tts):** Implement TTSProcessor.synthesize() method ([d6f3567](https://github.com/juspay/neurolink/commit/d6f3567dda26191f0ca9fd82a8cd7ccff5c9f819))
+
+## [8.12.0](https://github.com/juspay/neurolink/compare/v8.11.0...v8.12.0) (2025-12-13)
+
+### Features
+
+- **(files):** Install office processing dependencies: mammoth, xlsx, adm-zip, xml2js with TypeScript types ([a236818](https://github.com/juspay/neurolink/commit/a2368182e99b58a599e77e43e823439464a2f829))
+
+## [8.11.0](https://github.com/juspay/neurolink/compare/v8.10.1...v8.11.0) (2025-12-12)
+
+### Features
+
+- **(tts):** implement TTSProcessor skeleton class with handler registry ([8dc63d1](https://github.com/juspay/neurolink/commit/8dc63d15d8b71845145349b932651980aef61aa8))
+
+## [8.10.1](https://github.com/juspay/neurolink/compare/v8.10.0...v8.10.1) (2025-12-12)
+
+### Bug Fixes
+
+- **(ci):** check formatting instead of auto-fix to catch issues during PR builds ([6af89d2](https://github.com/juspay/neurolink/commit/6af89d233e444ff5cb4b7d38964d3ac2b6fc19bf))
+
+## [8.10.0](https://github.com/juspay/neurolink/compare/v8.9.0...v8.10.0) (2025-12-12)
+
+### Features
+
+- **(cli):** add video CLI flags tests and verification ([2d75347](https://github.com/juspay/neurolink/commit/2d753473cc75a219db4425783f4a062cca23873b))
+- **(models):** add GPT-5.2 and comprehensive model updates across all providers ([b75042f](https://github.com/juspay/neurolink/commit/b75042fcb98bbf19bdfe6f197ac12d6752b291ee))
+
+### Bug Fixes
+
+- **(ci):** use minimal plugins for semantic-release validation to avoid npm auth requirement ([f3ab09e](https://github.com/juspay/neurolink/commit/f3ab09e0cdc79ae70e55a37246d0edfe9a41a77d))
+
+## [8.9.0](https://github.com/juspay/neurolink/compare/v8.8.0...v8.9.0) (2025-12-11)
+
+### Features
+
+- **(csv):** add sampleDataFormat option for CSV metadata ([ded6ec4](https://github.com/juspay/neurolink/commit/ded6ec4ef0924ff020de079ed3a8031490e76094))
+
+## [8.8.0](https://github.com/juspay/neurolink/compare/v8.7.0...v8.8.0) (2025-12-11)
+
+### Features
+
+- **(types):** add AudioProviderConfig type definition for transcription providers ([c34f437](https://github.com/juspay/neurolink/commit/c34f437455fba20b803b84811b9dda143351427e))
+
+## [8.7.0](https://github.com/juspay/neurolink/compare/v8.6.0...v8.7.0) (2025-12-10)
+
+### Features
+
+- **(cli):** implement TTS audio file output (TTS-024) ([48af003](https://github.com/juspay/neurolink/commit/48af0033db12d3a7b7dd62b8fb5c965f61f20042))
+- **(ImageProcessor):** Add output validation to ImageProcessor.process() method ([6fe3a16](https://github.com/juspay/neurolink/commit/6fe3a16e8290a1a7640ab51865343583253418d0))
+- **(imageProcessor):** add retry logic with exponential backoff for URL downloads ([e6ab4df](https://github.com/juspay/neurolink/commit/e6ab4df4e974c3981d6a2e2de30d5b3e19ecccf9))
+- **(types):** add AudioProcessorOptions and audioOptions to FileDetectorOptions ([2bd877b](https://github.com/juspay/neurolink/commit/2bd877bd5f41fed786cabbdea6e57df95bd7debb))
+
+### Bug Fixes
+
+- **(deps):** convert canvas and pdfjs-dist to dynamic imports for SSR compatibility ([cc7d99e](https://github.com/juspay/neurolink/commit/cc7d99e33d5087ac4d8f442c0dfebdfad9c294c4))
+- **(deps):** force @semantic-release/npm v13 via pnpm override for OIDC support ([8a528c9](https://github.com/juspay/neurolink/commit/8a528c95e8c983ce3cb8d1196b8c08ae4ed93ec1))
+- **(lock):** add missing update for lockfile ([376b7ad](https://github.com/juspay/neurolink/commit/376b7ad0297e1f8f6fc68c5c58d30213bae9d23c))
+- **(release):** enable OIDC trusted publishing for npm ([3ba6dd9](https://github.com/juspay/neurolink/commit/3ba6dd9d7b6156e170550315f8a208ccafa5483a))
+- **(tts):** add audio property to GenerateResult type and improve type safety ([e85c7d0](https://github.com/juspay/neurolink/commit/e85c7d0435b6b4f81421ce816e2252b932e0b3ca))
+- **(workflows):** add job-level OIDC permissions and remove conflicting auth ([8ee4fb1](https://github.com/juspay/neurolink/commit/8ee4fb1ed3e0a996540032ddd92d4a491a2b53a1))
+- **(workflows):** add OIDC authentication for npm trusted publishing ([c6bb5bb](https://github.com/juspay/neurolink/commit/c6bb5bb33c34249ee89e8622d879f266025ecb9a))
+
+## [8.6.0](https://github.com/juspay/neurolink/compare/v8.5.1...v8.6.0) (2025-12-06)
+
+### Features
+
+- **(multimodal):** add altText support to ImageContent for accessibility ([27118c8](https://github.com/juspay/neurolink/commit/27118c87c73bc1eb6389bbc49dd2e59f1cc4c523)), closes [#565](https://github.com/juspay/neurolink/issues/565)
+
+### Bug Fixes
+
+- **(guardrails):** added fallback for guardrail errors on azure's jailbreak errors ([ae42552](https://github.com/juspay/neurolink/commit/ae4255255657c00ea164730dbd61fbad9f65f339))
+- **(observability):** add support to let applications customize traces ([608d991](https://github.com/juspay/neurolink/commit/608d991114c5df2335be73f44a24a187f424373a))
+
+## [8.5.1](https://github.com/juspay/neurolink/compare/v8.5.0...v8.5.1) (2025-12-04)
+
+### Bug Fixes
+
+- **(vertex):** clarify schema+tools support for Gemini vs Claude models ([e7beae9](https://github.com/juspay/neurolink/commit/e7beae987cfe58664145b32c2ae12140a5257c0c))
+
+## [8.5.0](https://github.com/juspay/neurolink/compare/v8.4.1...v8.5.0) (2025-12-04)
+
+### Features
+
+- **(audio):** add AudioProcessorOptions type for audio transcription configuration ([b969ba9](https://github.com/juspay/neurolink/commit/b969ba95daf6cbcc63d94f10d632a1e977726d52))
+
+## [8.4.1](https://github.com/juspay/neurolink/compare/v8.4.0...v8.4.1) (2025-12-04)
+
+### Bug Fixes
+
+- **(mem0):** custom instructions support for mem0 conversation ingestion ([486c55c](https://github.com/juspay/neurolink/commit/486c55c64eeaecf6704aea7a7bf5310270476be5))
+
+## [8.4.0](https://github.com/juspay/neurolink/compare/v8.3.0...v8.4.0) (2025-12-01)
+
+### Features
+
+- **(core):** comprehensive multimodal architecture with modular refactoring and enhanced testing ([fd8d207](https://github.com/juspay/neurolink/commit/fd8d207a2f9be61e65fd00d697a0456511ece30f))
+
+## [8.3.0](https://github.com/juspay/neurolink/compare/v8.2.0...v8.3.0) (2025-11-28)
+
+### Features
+
+- **(cli):** make stream the default command in loop mode ([7aeb1d7](https://github.com/juspay/neurolink/commit/7aeb1d790e1b103b5fc1889e21431e9c7b9dcf5f))
+
+## [8.2.0](https://github.com/juspay/neurolink/compare/v8.1.0...v8.2.0) (2025-11-25)
+
+### Features
+
+- **(vertex):** add global endpoint support for Gemini 3 Pro Preview ([5de2cbe](https://github.com/juspay/neurolink/commit/5de2cbe3f37ef3355f5d506c03ae4417f430724c))
+
+## [8.1.0](https://github.com/juspay/neurolink/compare/v8.0.1...v8.1.0) (2025-11-20)
+
+### Features
+
+- **(vertex):** add gemini-3-pro-preview model support ([896dc73](https://github.com/juspay/neurolink/commit/896dc73f017cf2c5c3a1cdbfa1806027e6acad4a))
+
+## [8.0.1](https://github.com/juspay/neurolink/compare/v8.0.0...v8.0.1) (2025-11-20)
+
+### Bug Fixes
+
+- **(lint):** prettier and lint errors ([810475c](https://github.com/juspay/neurolink/commit/810475ce5bf997e389b4ee2c769cee0c03da7dfb))
+- **(memory):** migrate to cloud-hosted mem0 API [BZ-45257] ([3a53a0c](https://github.com/juspay/neurolink/commit/3a53a0c792102fe5cd232f8b8c0ac59e73581497))
+
+## [8.0.0](https://github.com/juspay/neurolink/compare/v7.54.0...v8.0.0) (2025-11-19)
+
+### ⚠ BREAKING CHANGES
+
+- **(deps):** Node.js 20.18.1+ is now required due to undici v7 dependency.
+  Undici v7 requires the File API which is only available in Node.js 20.18.1+.
+
+Changes:
+
+- Update fileDetector.ts to use interceptors.redirect()
+- Update messageBuilder.ts to use interceptors.redirect()
+- Add getGlobalDispatcher and interceptors imports from undici
+- Temporarily exclude known package vulnerabilities from security validation
+- Require Node.js >=20.18.1 in package.json engines
+- Update npm requirement to >=10.0.0
+- Remove Node 18 from CI test matrix
+
+Fixes build failures introduced in f19c433 (undici bump to v7)
+
+### Features
+
+- **(observability):** add support for userid and sessionid in langfuse traces ([b1895a6](https://github.com/juspay/neurolink/commit/b1895a622edbba9c7c360069b411a0c575a271cb))
+
+### Bug Fixes
+
+- **(deps):** update undici v7 API usage and require Node.js 20+ ([dc81bba](https://github.com/juspay/neurolink/commit/dc81bba41b47c37340ec9a9d7c9f0d733c06adae))
+
+## [7.54.0](https://github.com/juspay/neurolink/compare/v7.53.5...v7.54.0) (2025-11-08)
+
+### Features
+
+- **(logs):** enable neurolink logs to be pushed into lighthouse ([9a752c4](https://github.com/juspay/neurolink/commit/9a752c4de4d300512027b7d405dda633701fae15))
+
+## [7.53.5](https://github.com/juspay/neurolink/compare/v7.53.4...v7.53.5) (2025-11-06)
+
+## [7.53.4](https://github.com/juspay/neurolink/compare/v7.53.3...v7.53.4) (2025-11-05)
+
+### Bug Fixes
+
+- **(sdk):** structured object response in generate function ([f16d597](https://github.com/juspay/neurolink/commit/f16d597f8e9a64f24a7a6ad5344c93add524c23d))
+
+## [7.53.3](https://github.com/juspay/neurolink/compare/v7.53.2...v7.53.3) (2025-11-03)
+
+## [7.53.2](https://github.com/juspay/neurolink/compare/v7.53.1...v7.53.2) (2025-10-28)
+
+## [7.53.1](https://github.com/juspay/neurolink/compare/v7.53.0...v7.53.1) (2025-10-27)
+
+### Bug Fixes
+
+- **(redis):** Emit redis related info through events for logging ([3224075](https://github.com/juspay/neurolink/commit/3224075d86c97f4206855d485748a95d609256af))
+
+## [7.53.0](https://github.com/juspay/neurolink/compare/v7.52.0...v7.53.0) (2025-10-26)
+
+### Features
+
+- **(test):** vitest configuration setup for cli ([ffb7db3](https://github.com/juspay/neurolink/commit/ffb7db301e2e883af5427db6e6d00a8a7dd65023))
+
+## [7.52.0](https://github.com/juspay/neurolink/compare/v7.51.3...v7.52.0) (2025-10-24)
+
+### Features
+
+- **(redis):** Enable SDK-level Redis configuration for multi-tenancy ([6c68883](https://github.com/juspay/neurolink/commit/6c688833ab48608e47402c7ee3c904c6986734ae))
+
+## [7.51.3](https://github.com/juspay/neurolink/compare/v7.51.2...v7.51.3) (2025-10-23)
+
+### Bug Fixes
+
+- **(neurolink):** add Zod schema detection for inputSchema field in baseProvider ([5ad0c0a](https://github.com/juspay/neurolink/commit/5ad0c0a1750b92e0e4412243f5b872f30c258624))
+
+## [7.51.2](https://github.com/juspay/neurolink/compare/v7.51.1...v7.51.2) (2025-10-14)
+
+## [7.51.1](https://github.com/juspay/neurolink/compare/v7.51.0...v7.51.1) (2025-10-13)
+
+## [7.51.0](https://github.com/juspay/neurolink/compare/v7.50.0...v7.51.0) (2025-10-12)
+
+### Features
+
+- **(multimodal):** add comprehensive PDF file support with native document processing ([52abf1a](https://github.com/juspay/neurolink/commit/52abf1a85d3a1d9de819919eec1d0ffea3007702))
+- **(multimodal):** add comprehensive PDF file support with native document processing ([020e15a](https://github.com/juspay/neurolink/commit/020e15af0bb46a2b827bb4853baafba5da03cad2))
+
+## [7.50.0](https://github.com/juspay/neurolink/compare/v7.49.0...v7.50.0) (2025-10-08)
+
+### Features
+
+- **(observability):** add langfuse and telemetry support ([4172d28](https://github.com/juspay/neurolink/commit/4172d283ebce0c6dddae356d278eeceb42aa8464))
+
+## [7.49.0](https://github.com/juspay/neurolink/compare/v7.48.1...v7.49.0) (2025-10-07)
+
+### Features
+
+- **(cli):** added support for resuming a conversation ([b860d29](https://github.com/juspay/neurolink/commit/b860d2995a2c3fe29a39c750f152d9f32abb612f))
+- **(middleware):** implement guardrails pre-call filtering with demo and proof ([b99a7f1](https://github.com/juspay/neurolink/commit/b99a7f15e5972eec4bd5652792f56f192239fd8d))
+- **(multimodal):** add comprehensive CSV file support with auto-detection and analysis tools ([374b375](https://github.com/juspay/neurolink/commit/374b3750a996a4e2e466bc1af1d54c9aec7f3b8c))
+
+### Bug Fixes
+
+- **(azure):** add SDK parameter support for lighthouse tool events compatibility ([a3bca3b](https://github.com/juspay/neurolink/commit/a3bca3b27b5505919a403896ee1dc1fb55a1983f))
+- **(formatting):** fixed linting issues with docs ([a7d1aff](https://github.com/juspay/neurolink/commit/a7d1affa6d8d00fd2b7491e1643e86654b242a40))
+
+## [7.48.1](https://github.com/juspay/neurolink/compare/v7.48.0...v7.48.1) (2025-10-02)
+
+## [7.48.0](https://github.com/juspay/neurolink/compare/v7.47.3...v7.48.0) (2025-09-30)
+
+### Features
+
+- **(cli):** add command history support on up/down ([5aa3c2d](https://github.com/juspay/neurolink/commit/5aa3c2db04714019b34af0fd69106a8fd21ac252))
+
+## [7.47.3](https://github.com/juspay/neurolink/compare/v7.47.2...v7.47.3) (2025-09-26)
+
+## [7.47.2](https://github.com/juspay/neurolink/compare/v7.47.1...v7.47.2) (2025-09-26)
+
+### Bug Fixes
+
+- **(timestamp):** Incorrect timestamps being stored in redis ([2d66232](https://github.com/juspay/neurolink/commit/2d6623275bc4c1f5986957d476ddcf3933ba61e4))
+
+## [7.47.1](https://github.com/juspay/neurolink/compare/v7.47.0...v7.47.1) (2025-09-26)
+
+### Bug Fixes
+
+- **(tools):** Unregistered tools getting called ([45fd67a](https://github.com/juspay/neurolink/commit/45fd67af418b5e458ce6a261a7891234a8d489b8))
+
+## [7.47.0](https://github.com/juspay/neurolink/compare/v7.46.0...v7.47.0) (2025-09-25)
+
+### Features
+
+- **(chat):** Implement multimodal UI and extend SDK support ([12a2f59](https://github.com/juspay/neurolink/commit/12a2f59c4826e82ab1feb1347d08980682748ad2))
+
+## [7.46.0](https://github.com/juspay/neurolink/compare/v7.45.0...v7.46.0) (2025-09-24)
+
+### Features
+
+- **(auto-evaluation):** added auto evaluation for LLM response ([6f23fae](https://github.com/juspay/neurolink/commit/6f23fae5cacb1c0686257cc7ed547be675b68b23))
+
+## [7.45.0](https://github.com/juspay/neurolink/compare/v7.44.0...v7.45.0) (2025-09-24)
+
+### Features
+
+- **(provider):** Add support to provide region while streaming or generating for few providers ([a0a5bed](https://github.com/juspay/neurolink/commit/a0a5bed2bba4118dde149713708e36d4d29e1aae))
+
+## [7.44.0](https://github.com/juspay/neurolink/compare/v7.43.0...v7.44.0) (2025-09-24)
+
+### Features
+
+- **(sdk):** Integrate mem0 for better context ([78edf08](https://github.com/juspay/neurolink/commit/78edf08467432988c968eb06f510f0198b253665))
+
+## [7.43.0](https://github.com/juspay/neurolink/compare/v7.42.0...v7.43.0) (2025-09-23)
+
+### Features
+
+- **(cli):** auto-detect and enable redis support in loop conversation memory ([b7b5514](https://github.com/juspay/neurolink/commit/b7b55149eb49a9f0ffa2a257c96d869b0da59eeb))
+
+## [7.42.0](https://github.com/juspay/neurolink/compare/v7.41.4...v7.42.0) (2025-09-23)
+
+### Features
+
+- **(middleware):** robust bad word filtering in guardrails and correct stream usage ([d396797](https://github.com/juspay/neurolink/commit/d396797640832a373b386a7c550ec406e129d2d2))
+
+## [7.41.4](https://github.com/juspay/neurolink/compare/v7.41.3...v7.41.4) (2025-09-21)
+
+### Bug Fixes
+
+- **(types):** expose core SDK types for external developer integration ([66199c9](https://github.com/juspay/neurolink/commit/66199c9fb579f1aaab929ca987ac028eafa61a46))
+
+## [7.41.3](https://github.com/juspay/neurolink/compare/v7.41.2...v7.41.3) (2025-09-20)
+
+## [7.41.2](https://github.com/juspay/neurolink/compare/v7.41.1...v7.41.2) (2025-09-20)
+
+## [7.41.1](https://github.com/juspay/neurolink/compare/v7.41.0...v7.41.1) (2025-09-20)
+
+## [7.41.0](https://github.com/juspay/neurolink/compare/v7.40.1...v7.41.0) (2025-09-20)
+
+### Features
+
+- **(test):** Added tests for hitl ([5ab1885](https://github.com/juspay/neurolink/commit/5ab1885eb8788dd499cda94c67d1791e7dd9b90f))
+
+## [7.40.1](https://github.com/juspay/neurolink/compare/v7.40.0...v7.40.1) (2025-09-17)
+
+### Bug Fixes
+
+- **(title):** Update system prompt to generate better title ([9d0e5b8](https://github.com/juspay/neurolink/commit/9d0e5b85a11f2cfe67942f7db407193842f8b93f))
+
+## [7.40.0](https://github.com/juspay/neurolink/compare/v7.39.0...v7.40.0) (2025-09-17)
+
+### Features
+
+- **(envsetup):** Added env setup test ([d08917e](https://github.com/juspay/neurolink/commit/d08917e69675aedd468c25697250c24fbfa21372))
+
+## [7.39.0](https://github.com/juspay/neurolink/compare/v7.38.1...v7.39.0) (2025-09-16)
+
+### Features
+
+- **(hitl):** Implemented human in the loop for sdk ([1a66f53](https://github.com/juspay/neurolink/commit/1a66f533d4d92fb33d203947a4c6648a72db631c))
+
+## [7.38.1](https://github.com/juspay/neurolink/compare/v7.38.0...v7.38.1) (2025-09-16)
+
+### Bug Fixes
+
+- **(tool):** Openai provider's no of tool to pass ([8804d56](https://github.com/juspay/neurolink/commit/8804d5643672823d8e4684ecc622684935c3bdfe))
+
+## [7.38.0](https://github.com/juspay/neurolink/compare/v7.37.1...v7.38.0) (2025-09-14)
+
+### Features
+
+- **(memory):** Add support to store tool history in redis ([93d3223](https://github.com/juspay/neurolink/commit/93d32236475bfbd9f3c4017ee47c54729f681350))
+
+## [7.37.1](https://github.com/juspay/neurolink/compare/v7.37.0...v7.37.1) (2025-09-13)
+
+### Bug Fixes
+
+- **(tools):** resolve MCP tool execution and parameter validation failures ([2aa2ef7](https://github.com/juspay/neurolink/commit/2aa2ef7db1293e158e5dd34f63050a87aa302ddf))
+
+## [7.37.0](https://github.com/juspay/neurolink/compare/v7.36.0...v7.37.0) (2025-09-10)
+
+### Features
+
+- **(sdk):** Add advanced orchestration of model and providers BZ-43839 ([840d697](https://github.com/juspay/neurolink/commit/840d697aa6ef3e5e4c511a9482fc7e80006d2534))
+
+## [7.36.0](https://github.com/juspay/neurolink/compare/v7.35.0...v7.36.0) (2025-09-10)
+
+### Features
+
+- **(image):** added support for multimodality(image) in cli and sdk ([678b61b](https://github.com/juspay/neurolink/commit/678b61bfef3d0622029d40b8ab06dca9836bcb6c))
+
+## [7.35.0](https://github.com/juspay/neurolink/compare/v7.34.0...v7.35.0) (2025-09-09)
+
+### Features
+
+- **(cli):** Add interactive provider setup wizard ([50ee963](https://github.com/juspay/neurolink/commit/50ee9631ea88e63cb2d39c1ab792fc015402bb49))
+
+## [7.34.0](https://github.com/juspay/neurolink/compare/v7.33.4...v7.34.0) (2025-09-09)
+
+### Features
+
+- **(cli):** expose memory commands to cli from sdk ([b9eb802](https://github.com/juspay/neurolink/commit/b9eb802c0ecfa521327e0423b5a9167119ac2fca))
+- **(cli):** Implement interactive loop mode ([89b5012](https://github.com/juspay/neurolink/commit/89b5012ff44bac58e01846834d05ea50fe37cd35))
+- **(memory):** Add Redis Support for conversation History ([28e2f86](https://github.com/juspay/neurolink/commit/28e2f86b4aa5b6e43d2bc71a86885cca40851e44))
+- **(tool):** Optimize tool discovery and add conversation tutorial ([56c7a3f](https://github.com/juspay/neurolink/commit/56c7a3fac9713cdd17f3f719f793e41fce39259b))
+
 ## [7.33.4](https://github.com/juspay/neurolink/compare/v7.33.3...v7.33.4) (2025-09-04)
 
 ### Bug Fixes
@@ -758,21 +1218,18 @@ Co-authored-by: sachin.sharma <sachin.sharma@juspay.in>
 ### 🎯 Major Feature: Dynamic Model Configuration System
 
 - **⚡ Revolutionary Model Management**: Introduced dynamic model configuration system replacing static enums
-
   - **Self-Updating Models**: New models automatically available without code updates
   - **Cost Optimization**: Automatic selection of cheapest models for tasks
   - **Smart Resolution**: Fuzzy matching, aliases, and capability-based search
   - **Multi-Source Loading**: Configuration from API → GitHub → local with fallback
 
 - **💰 Cost Intelligence**: Built-in cost optimization and model selection algorithms
-
   - **Current Leader**: Gemini 2.0 Flash at $0.000075/1K input tokens
   - **Capability Mapping**: Find models by features (functionCalling, vision, code-execution)
   - **Real-Time Pricing**: Always current model costs and performance data
   - **Budget Controls**: Maximum price filtering and cost-aware selection
 
 - **🔧 Production-Ready Infrastructure**: Complete system with validation and monitoring
-
   - **Model Configuration Server**: REST API with search capabilities (`scripts/model-server.js`)
   - **Zod Schema Validation**: Type-safe runtime configuration validation
   - **Comprehensive Testing**: Full test suite for all dynamic model functionality
@@ -824,19 +1281,16 @@ Co-authored-by: sachin.sharma <sachin.sharma@juspay.in>
 ### Bug Fixes - MCP System Restoration
 
 - **🔧 Fixed Built-in Tool Loading**: Resolved critical circular dependency issues preventing default tools from loading
-
   - **Root Cause**: Circular dependency between `config.ts` and `unified-registry.ts` preventing proper initialization
   - **Solution**: Implemented dynamic imports and restructured initialization chain
   - **Result**: Built-in tools restored from 0 → 3 tools (100% recovery rate)
 
 - **⏰ Fixed Time Tool Functionality**: Time tool now properly available and returns accurate real-time data
-
   - Fixed tool registration and execution pathway
   - Proper timezone handling and formatting
   - Verified accuracy against system time
 
 - **🔍 Enhanced External Tool Discovery**: 58+ external MCP tools now discoverable via comprehensive auto-discovery
-
   - Auto-discovery across VS Code, Claude Desktop, Cursor, Windsurf
   - Proper placeholder system for lazy activation
   - Unified registry integration
@@ -891,7 +1345,6 @@ Co-authored-by: sachin.sharma <sachin.sharma@juspay.in>
 ### Features
 
 - **🛠️ Enhanced CLI with Ollama Commands**: New Ollama-specific management commands
-
   - `neurolink ollama list-models` - List installed local models
   - `neurolink ollama pull <model>` - Download models locally
   - `neurolink ollama remove <model>` - Remove installed models
@@ -972,14 +1425,12 @@ neurolink generate-text "test" --debug
 ### Patch Changes
 
 - **🔧 Production-Ready CLI Logging System**: Fixed critical logging system for clean production output
-
   - **Issue**: CLI showed excessive debug output during normal operation, breaking demo presentations
   - **Root Cause**: Mixed console.log statements bypassed conditional logger system
   - **Solution**: Systematic replacement of all console.log with logger.debug across codebase
   - **Impact**: **Clean CLI output by default** with conditional debug available via `NEUROLINK_DEBUG=true`
 
 - **🔄 Enhanced Provider Fallback Logic**: Fixed incomplete provider fallback coverage
-
   - **Issue**: Provider fallback only attempted 4 of 6 providers (missing Anthropic & Azure)
   - **Root Cause**: Incomplete provider array in NeuroLink class fallback logic
   - **Solution**: Updated to include all 6 providers: `['openai', 'vertex', 'bedrock', 'anthropic', 'azure', 'google-ai']`
@@ -1023,7 +1474,6 @@ NEUROLINK_DEBUG=true node dist/cli/cli/index.js generate-text "test" --max-token
 ### Patch Changes
 
 - **🔧 Critical CLI Dependency Fix**: Removed peer dependencies to ensure zero-friction CLI usage
-
   - **Issue**: CLI commands failed when provider-specific SDK packages were peer dependencies
   - **Root Cause**: `npx` doesn't install peer dependencies, causing missing module errors
   - **Solution**: Moved ALL AI provider SDKs to regular dependencies

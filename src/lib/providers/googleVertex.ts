@@ -14,7 +14,7 @@ import {
   type LanguageModelV1,
   type LanguageModel,
 } from "ai";
-import type { AIProviderName } from "../types/index.js";
+import { AIProviderName } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import type { UnknownRecord } from "../types/common.js";
 import type { NeuroLink } from "../neurolink.js";
@@ -32,8 +32,9 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import dns from "dns";
-import { buildMessagesArray } from "../utils/messageBuilder.js";
 import { createProxyFetch } from "../proxy/proxyFetch.js";
+
+// Import proper types for multimodal message handling
 
 // Enhanced Anthropic support with direct imports
 // Using the dual provider architecture from Vercel AI SDK
@@ -76,207 +77,212 @@ const hasGoogleCredentials = (): boolean => {
 };
 
 // Enhanced Vertex settings creation with authentication fallback and proxy support
-const createVertexSettings =
-  async (): Promise<GoogleVertexProviderSettings> => {
-    const baseSettings: GoogleVertexProviderSettings = {
-      project: getVertexProjectId(),
-      location: getVertexLocation(),
-      fetch: createProxyFetch(),
-    };
+const createVertexSettings = async (
+  region?: string,
+): Promise<GoogleVertexProviderSettings> => {
+  const location = region || getVertexLocation();
+  const project = getVertexProjectId();
 
-    // 🎯 OPTION 2: Create credentials file from environment variables at runtime
-    // This solves the problem where GOOGLE_APPLICATION_CREDENTIALS exists in ZSHRC locally
-    // but the file doesn't exist on production servers
+  const baseSettings: GoogleVertexProviderSettings = {
+    project,
+    location,
+    fetch: createProxyFetch(),
+  };
 
-    // First, try to create credentials file from individual environment variables
-    const requiredEnvVarsForFile = {
-      type: process.env.GOOGLE_AUTH_TYPE,
-      project_id: process.env.GOOGLE_AUTH_BREEZE_PROJECT_ID,
-      private_key: process.env.GOOGLE_AUTH_PRIVATE_KEY,
-      client_email: process.env.GOOGLE_AUTH_CLIENT_EMAIL,
-      client_id: process.env.GOOGLE_AUTH_CLIENT_ID,
-      auth_uri: process.env.GOOGLE_AUTH_AUTH_URI,
-      token_uri: process.env.GOOGLE_AUTH_TOKEN_URI,
-      auth_provider_x509_cert_url:
-        process.env.GOOGLE_AUTH_AUTH_PROVIDER_CERT_URL,
-      client_x509_cert_url: process.env.GOOGLE_AUTH_CLIENT_CERT_URL,
-      universe_domain: process.env.GOOGLE_AUTH_UNIVERSE_DOMAIN,
-    };
+  // Special handling for global endpoint
+  // Google's global endpoint uses aiplatform.googleapis.com (no region prefix)
+  // instead of {region}-aiplatform.googleapis.com
+  if (location === "global") {
+    baseSettings.baseURL = `https://aiplatform.googleapis.com/v1/projects/${project}/locations/global/publishers/google`;
+  }
 
-    // If we have the essential fields, create a runtime credentials file
-    if (
-      requiredEnvVarsForFile.client_email &&
-      requiredEnvVarsForFile.private_key
-    ) {
-      try {
-        // Build complete service account credentials object
-        const serviceAccountCredentials = {
-          type: requiredEnvVarsForFile.type || "service_account",
-          project_id: requiredEnvVarsForFile.project_id || getVertexProjectId(),
-          private_key: requiredEnvVarsForFile.private_key.replace(/\\n/g, "\n"),
-          client_email: requiredEnvVarsForFile.client_email,
-          client_id: requiredEnvVarsForFile.client_id || "",
-          auth_uri:
-            requiredEnvVarsForFile.auth_uri ||
-            "https://accounts.google.com/o/oauth2/auth",
-          token_uri:
-            requiredEnvVarsForFile.token_uri ||
-            "https://oauth2.googleapis.com/token",
-          auth_provider_x509_cert_url:
-            requiredEnvVarsForFile.auth_provider_x509_cert_url ||
-            "https://www.googleapis.com/oauth2/v1/certs",
-          client_x509_cert_url:
-            requiredEnvVarsForFile.client_x509_cert_url || "",
-          universe_domain:
-            requiredEnvVarsForFile.universe_domain || "googleapis.com",
-        };
+  // 🎯 OPTION 2: Create credentials file from environment variables at runtime
+  // This solves the problem where GOOGLE_APPLICATION_CREDENTIALS exists in ZSHRC locally
+  // but the file doesn't exist on production servers
 
-        // Create temporary credentials file
-        const tmpDir = os.tmpdir();
-        const credentialsFileName = `google-credentials-${Date.now()}-${Math.random().toString(36).substring(2, 11)}.json`;
-        const credentialsFilePath = path.join(tmpDir, credentialsFileName);
+  // First, try to create credentials file from individual environment variables
+  const requiredEnvVarsForFile = {
+    type: process.env.GOOGLE_AUTH_TYPE,
+    project_id: process.env.GOOGLE_AUTH_BREEZE_PROJECT_ID,
+    private_key: process.env.GOOGLE_AUTH_PRIVATE_KEY,
+    client_email: process.env.GOOGLE_AUTH_CLIENT_EMAIL,
+    client_id: process.env.GOOGLE_AUTH_CLIENT_ID,
+    auth_uri: process.env.GOOGLE_AUTH_AUTH_URI,
+    token_uri: process.env.GOOGLE_AUTH_TOKEN_URI,
+    auth_provider_x509_cert_url: process.env.GOOGLE_AUTH_AUTH_PROVIDER_CERT_URL,
+    client_x509_cert_url: process.env.GOOGLE_AUTH_CLIENT_CERT_URL,
+    universe_domain: process.env.GOOGLE_AUTH_UNIVERSE_DOMAIN,
+  };
 
-        fs.writeFileSync(
-          credentialsFilePath,
-          JSON.stringify(serviceAccountCredentials, null, 2),
-        );
+  // If we have the essential fields, create a runtime credentials file
+  if (
+    requiredEnvVarsForFile.client_email &&
+    requiredEnvVarsForFile.private_key
+  ) {
+    try {
+      // Build complete service account credentials object
+      const serviceAccountCredentials = {
+        type: requiredEnvVarsForFile.type || "service_account",
+        project_id: requiredEnvVarsForFile.project_id || getVertexProjectId(),
+        private_key: requiredEnvVarsForFile.private_key.replace(/\\n/g, "\n"),
+        client_email: requiredEnvVarsForFile.client_email,
+        client_id: requiredEnvVarsForFile.client_id || "",
+        auth_uri:
+          requiredEnvVarsForFile.auth_uri ||
+          "https://accounts.google.com/o/oauth2/auth",
+        token_uri:
+          requiredEnvVarsForFile.token_uri ||
+          "https://oauth2.googleapis.com/token",
+        auth_provider_x509_cert_url:
+          requiredEnvVarsForFile.auth_provider_x509_cert_url ||
+          "https://www.googleapis.com/oauth2/v1/certs",
+        client_x509_cert_url: requiredEnvVarsForFile.client_x509_cert_url || "",
+        universe_domain:
+          requiredEnvVarsForFile.universe_domain || "googleapis.com",
+      };
 
-        // Set the environment variable to point to our runtime-created file
-        process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsFilePath;
+      // Create temporary credentials file
+      const tmpDir = os.tmpdir();
+      const credentialsFileName = `google-credentials-${Date.now()}-${Math.random().toString(36).substring(2, 11)}.json`;
+      const credentialsFilePath = path.join(tmpDir, credentialsFileName);
 
-        // Now continue with the normal flow - check if the file exists
-        const fileExists = fs.existsSync(credentialsFilePath);
-        if (fileExists) {
-          return baseSettings;
-        }
-      } catch {
-        // Silent error handling for runtime credentials file creation
-      }
-    }
+      fs.writeFileSync(
+        credentialsFilePath,
+        JSON.stringify(serviceAccountCredentials, null, 2),
+      );
 
-    // 🎯 OPTION 1: Check for principal account authentication (Accept any valid GOOGLE_APPLICATION_CREDENTIALS file (service account OR ADC))
-    if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      // Set the environment variable to point to our runtime-created file
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsFilePath;
 
-      // Check if the credentials file exists
-      let fileExists = false;
-      try {
-        fileExists = fs.existsSync(credentialsPath);
-      } catch {
-        fileExists = false;
-      }
-
+      // Now continue with the normal flow - check if the file exists
+      const fileExists = fs.existsSync(credentialsFilePath);
       if (fileExists) {
         return baseSettings;
       }
+    } catch {
+      // Silent error handling for runtime credentials file creation
+    }
+  }
+
+  // 🎯 OPTION 1: Check for principal account authentication (Accept any valid GOOGLE_APPLICATION_CREDENTIALS file (service account OR ADC))
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+    // Check if the credentials file exists
+    let fileExists = false;
+    try {
+      fileExists = fs.existsSync(credentialsPath);
+    } catch {
+      fileExists = false;
     }
 
-    // Fallback to explicit credentials for development and production
-    // Enhanced to check ALL required fields from the .env file configuration
-    const requiredEnvVars = {
-      type: process.env.GOOGLE_AUTH_TYPE,
-      project_id: process.env.GOOGLE_AUTH_BREEZE_PROJECT_ID,
-      private_key: process.env.GOOGLE_AUTH_PRIVATE_KEY,
-      client_email: process.env.GOOGLE_AUTH_CLIENT_EMAIL,
-      client_id: process.env.GOOGLE_AUTH_CLIENT_ID,
-      auth_uri: process.env.GOOGLE_AUTH_AUTH_URI,
-      token_uri: process.env.GOOGLE_AUTH_TOKEN_URI,
+    if (fileExists) {
+      return baseSettings;
+    }
+  }
+
+  // Fallback to explicit credentials for development and production
+  // Enhanced to check ALL required fields from the .env file configuration
+  const requiredEnvVars = {
+    type: process.env.GOOGLE_AUTH_TYPE,
+    project_id: process.env.GOOGLE_AUTH_BREEZE_PROJECT_ID,
+    private_key: process.env.GOOGLE_AUTH_PRIVATE_KEY,
+    client_email: process.env.GOOGLE_AUTH_CLIENT_EMAIL,
+    client_id: process.env.GOOGLE_AUTH_CLIENT_ID,
+    auth_uri: process.env.GOOGLE_AUTH_AUTH_URI,
+    token_uri: process.env.GOOGLE_AUTH_TOKEN_URI,
+    auth_provider_x509_cert_url: process.env.GOOGLE_AUTH_AUTH_PROVIDER_CERT_URL,
+    client_x509_cert_url: process.env.GOOGLE_AUTH_CLIENT_CERT_URL,
+    universe_domain: process.env.GOOGLE_AUTH_UNIVERSE_DOMAIN,
+  };
+
+  // Check if we have the minimal required fields (client_email and private_key are essential)
+  if (requiredEnvVars.client_email && requiredEnvVars.private_key) {
+    logger.debug("Using explicit service account credentials authentication", {
+      authMethod: "explicit_service_account_credentials",
+      hasType: !!requiredEnvVars.type,
+      hasProjectId: !!requiredEnvVars.project_id,
+      hasClientEmail: !!requiredEnvVars.client_email,
+      hasPrivateKey: !!requiredEnvVars.private_key,
+      hasClientId: !!requiredEnvVars.client_id,
+      hasAuthUri: !!requiredEnvVars.auth_uri,
+      hasTokenUri: !!requiredEnvVars.token_uri,
+      hasAuthProviderCertUrl: !!requiredEnvVars.auth_provider_x509_cert_url,
+      hasClientCertUrl: !!requiredEnvVars.client_x509_cert_url,
+      hasUniverseDomain: !!requiredEnvVars.universe_domain,
+      credentialsCompleteness: "using_individual_env_vars_as_fallback",
+    });
+
+    // Build complete service account credentials object
+    const serviceAccountCredentials = {
+      type: requiredEnvVars.type || "service_account",
+      project_id: requiredEnvVars.project_id || getVertexProjectId(),
+      private_key: requiredEnvVars.private_key.replace(/\\n/g, "\n"),
+      client_email: requiredEnvVars.client_email,
+      client_id: requiredEnvVars.client_id || "",
+      auth_uri:
+        requiredEnvVars.auth_uri || "https://accounts.google.com/o/oauth2/auth",
+      token_uri:
+        requiredEnvVars.token_uri || "https://oauth2.googleapis.com/token",
       auth_provider_x509_cert_url:
-        process.env.GOOGLE_AUTH_AUTH_PROVIDER_CERT_URL,
-      client_x509_cert_url: process.env.GOOGLE_AUTH_CLIENT_CERT_URL,
-      universe_domain: process.env.GOOGLE_AUTH_UNIVERSE_DOMAIN,
+        requiredEnvVars.auth_provider_x509_cert_url ||
+        "https://www.googleapis.com/oauth2/v1/certs",
+      client_x509_cert_url: requiredEnvVars.client_x509_cert_url || "",
+      universe_domain: requiredEnvVars.universe_domain || "googleapis.com",
     };
 
-    // Check if we have the minimal required fields (client_email and private_key are essential)
-    if (requiredEnvVars.client_email && requiredEnvVars.private_key) {
-      logger.debug(
-        "Using explicit service account credentials authentication",
-        {
-          authMethod: "explicit_service_account_credentials",
-          hasType: !!requiredEnvVars.type,
-          hasProjectId: !!requiredEnvVars.project_id,
-          hasClientEmail: !!requiredEnvVars.client_email,
-          hasPrivateKey: !!requiredEnvVars.private_key,
-          hasClientId: !!requiredEnvVars.client_id,
-          hasAuthUri: !!requiredEnvVars.auth_uri,
-          hasTokenUri: !!requiredEnvVars.token_uri,
-          hasAuthProviderCertUrl: !!requiredEnvVars.auth_provider_x509_cert_url,
-          hasClientCertUrl: !!requiredEnvVars.client_x509_cert_url,
-          hasUniverseDomain: !!requiredEnvVars.universe_domain,
-          credentialsCompleteness: "using_individual_env_vars_as_fallback",
-        },
-      );
-
-      // Build complete service account credentials object
-      const serviceAccountCredentials = {
-        type: requiredEnvVars.type || "service_account",
-        project_id: requiredEnvVars.project_id || getVertexProjectId(),
-        private_key: requiredEnvVars.private_key.replace(/\\n/g, "\n"),
-        client_email: requiredEnvVars.client_email,
-        client_id: requiredEnvVars.client_id || "",
-        auth_uri:
-          requiredEnvVars.auth_uri ||
-          "https://accounts.google.com/o/oauth2/auth",
-        token_uri:
-          requiredEnvVars.token_uri || "https://oauth2.googleapis.com/token",
-        auth_provider_x509_cert_url:
-          requiredEnvVars.auth_provider_x509_cert_url ||
-          "https://www.googleapis.com/oauth2/v1/certs",
-        client_x509_cert_url: requiredEnvVars.client_x509_cert_url || "",
-        universe_domain: requiredEnvVars.universe_domain || "googleapis.com",
-      };
-
-      return {
-        ...baseSettings,
-        googleAuthOptions: {
-          credentials: serviceAccountCredentials,
-        },
-      };
-    }
-
-    // Log comprehensive warning if no valid authentication is available
-    logger.warn("No valid authentication found for Google Vertex AI", {
-      authMethod: "none",
-      authenticationAttempts: {
-        principalAccountFile: {
-          envVarSet: !!process.env.GOOGLE_APPLICATION_CREDENTIALS,
-          filePath: process.env.GOOGLE_APPLICATION_CREDENTIALS || "NOT_SET",
-          fileExists: false, // We already checked above
-        },
-        explicitCredentials: {
-          hasClientEmail: !!requiredEnvVars.client_email,
-          hasPrivateKey: !!requiredEnvVars.private_key,
-          hasProjectId: !!requiredEnvVars.project_id,
-          hasType: !!requiredEnvVars.type,
-          missingFields: Object.entries(requiredEnvVars)
-            .filter(([_key, value]) => !value)
-            .map(([key]) => key),
-        },
+    return {
+      ...baseSettings,
+      googleAuthOptions: {
+        credentials: serviceAccountCredentials,
       },
-      troubleshooting: [
-        "1. Ensure GOOGLE_APPLICATION_CREDENTIALS points to an existing file, OR",
-        "2. Set individual environment variables: GOOGLE_AUTH_CLIENT_EMAIL and GOOGLE_AUTH_PRIVATE_KEY",
-      ],
-    });
-    return baseSettings;
-  };
+    };
+  }
+
+  // Log comprehensive warning if no valid authentication is available
+  logger.warn("No valid authentication found for Google Vertex AI", {
+    authMethod: "none",
+    authenticationAttempts: {
+      principalAccountFile: {
+        envVarSet: !!process.env.GOOGLE_APPLICATION_CREDENTIALS,
+        filePath: process.env.GOOGLE_APPLICATION_CREDENTIALS || "NOT_SET",
+        fileExists: false, // We already checked above
+      },
+      explicitCredentials: {
+        hasClientEmail: !!requiredEnvVars.client_email,
+        hasPrivateKey: !!requiredEnvVars.private_key,
+        hasProjectId: !!requiredEnvVars.project_id,
+        hasType: !!requiredEnvVars.type,
+        missingFields: Object.entries(requiredEnvVars)
+          .filter(([_key, value]) => !value)
+          .map(([key]) => key),
+      },
+    },
+    troubleshooting: [
+      "1. Ensure GOOGLE_APPLICATION_CREDENTIALS points to an existing file, OR",
+      "2. Set individual environment variables: GOOGLE_AUTH_CLIENT_EMAIL and GOOGLE_AUTH_PRIVATE_KEY",
+    ],
+  });
+  return baseSettings;
+};
 
 // Create Anthropic-specific Vertex settings with the same authentication and proxy support
-const createVertexAnthropicSettings =
-  async (): Promise<GoogleVertexAnthropicProviderSettings> => {
-    const baseVertexSettings = await createVertexSettings();
+const createVertexAnthropicSettings = async (
+  region?: string,
+): Promise<GoogleVertexAnthropicProviderSettings> => {
+  const baseVertexSettings = await createVertexSettings(region);
 
-    // GoogleVertexAnthropicProviderSettings extends GoogleVertexProviderSettings
-    // so we can use the same settings with proper typing
-    return {
-      project: baseVertexSettings.project,
-      location: baseVertexSettings.location,
-      fetch: baseVertexSettings.fetch,
-      ...(baseVertexSettings.googleAuthOptions && {
-        googleAuthOptions: baseVertexSettings.googleAuthOptions,
-      }),
-    } as GoogleVertexAnthropicProviderSettings;
-  };
+  // GoogleVertexAnthropicProviderSettings extends GoogleVertexProviderSettings
+  // so we can use the same settings with proper typing
+  return {
+    project: baseVertexSettings.project,
+    location: baseVertexSettings.location,
+    fetch: baseVertexSettings.fetch,
+    ...(baseVertexSettings.googleAuthOptions && {
+      googleAuthOptions: baseVertexSettings.googleAuthOptions,
+    }),
+  } as GoogleVertexAnthropicProviderSettings;
+};
 
 // Helper function to determine if a model is an Anthropic model
 const isAnthropicModel = (modelName: string): boolean => {
@@ -293,6 +299,41 @@ const isAnthropicModel = (modelName: string): boolean => {
  * - Fresh model creation for each request
  * - Enhanced error handling with setup guidance
  * - Tool registration and context management
+ *
+ * @important Structured Output Limitation (Gemini Models Only)
+ * Google Gemini models on Vertex AI cannot combine function calling (tools) with
+ * structured output (JSON schema). When using schemas, you MUST set disableTools: true.
+ *
+ * Error without disableTools:
+ * "Function calling with a response mime type: 'application/json' is unsupported"
+ *
+ * This limitation ONLY affects Gemini models. Anthropic Claude models via Vertex
+ * AI do NOT have this limitation and support both tools + schemas simultaneously.
+ *
+ * @example Gemini models with schemas
+ * ```typescript
+ * const provider = new GoogleVertexProvider("gemini-2.5-flash");
+ * const result = await provider.generate({
+ *   input: { text: "Analyze data" },
+ *   schema: MySchema,
+ *   output: { format: "json" },
+ *   disableTools: true  // Required for Gemini models
+ * });
+ * ```
+ *
+ * @example Claude models (no limitation)
+ * ```typescript
+ * const provider = new GoogleVertexProvider("claude-3-5-sonnet-20241022");
+ * const result = await provider.generate({
+ *   input: { text: "Analyze data" },
+ *   schema: MySchema,
+ *   output: { format: "json" }
+ *   // No disableTools needed - Claude supports both
+ * });
+ * ```
+ *
+ * @note Gemini 3 Pro Preview (November 2025) will support combining tools + schemas
+ * @see https://cloud.google.com/vertex-ai/docs/generative-ai/learn/models
  */
 export class GoogleVertexProvider extends BaseProvider {
   private projectId: string;
@@ -318,7 +359,12 @@ export class GoogleVertexProvider extends BaseProvider {
   private static maxTokensCache: Map<string, boolean> = new Map();
   private static maxTokensCacheTime = 0;
 
-  constructor(modelName?: string, _providerName?: string, sdk?: unknown) {
+  constructor(
+    modelName?: string,
+    _providerName?: string,
+    sdk?: unknown,
+    region?: string,
+  ) {
     super(modelName, "vertex" as AIProviderName, sdk as NeuroLink | undefined);
 
     // Validate Google Cloud credentials - now using consolidated utility
@@ -328,8 +374,7 @@ export class GoogleVertexProvider extends BaseProvider {
 
     // Initialize Google Cloud configuration
     this.projectId = getVertexProjectId();
-    this.location = getVertexLocation();
-
+    this.location = region || getVertexLocation();
     logger.debug("Google Vertex AI BaseProvider v2 initialized", {
       modelName: this.modelName,
       projectId: this.projectId,
@@ -356,7 +401,7 @@ export class GoogleVertexProvider extends BaseProvider {
   }
 
   /**
-   * Initialize model creation logging and tracking
+   * Initialize model creation tracking
    */
   private initializeModelCreationLogging(): {
     modelCreationId: string;
@@ -368,44 +413,6 @@ export class GoogleVertexProvider extends BaseProvider {
     const modelCreationStartTime = Date.now();
     const modelCreationHrTimeStart = process.hrtime.bigint();
     const modelName = this.modelName || getDefaultVertexModel();
-
-    logger.debug(
-      `[GoogleVertexProvider] 🏭 LOG_POINT_V001_MODEL_CREATION_START`,
-      {
-        logPoint: "V001_MODEL_CREATION_START",
-        modelCreationId,
-        timestamp: new Date().toISOString(),
-        modelCreationStartTime,
-        modelCreationHrTimeStart: modelCreationHrTimeStart.toString(),
-        requestedModel: this.modelName,
-        resolvedModel: modelName,
-        defaultModel: getDefaultVertexModel(),
-        projectId: this.projectId,
-        location: this.location,
-
-        // Environment analysis for network issues
-        environmentAnalysis: {
-          httpProxy:
-            process.env.HTTP_PROXY || process.env.http_proxy || "NOT_SET",
-          httpsProxy:
-            process.env.HTTPS_PROXY || process.env.https_proxy || "NOT_SET",
-          googleAppCreds:
-            process.env.GOOGLE_APPLICATION_CREDENTIALS || "NOT_SET",
-          googleServiceKey: process.env.GOOGLE_SERVICE_ACCOUNT_KEY
-            ? "SET"
-            : "NOT_SET",
-          nodeVersion: process.version,
-          platform: process.platform,
-          arch: process.arch,
-        },
-
-        // Memory and performance baseline
-        memoryUsage: process.memoryUsage(),
-        cpuUsage: process.cpuUsage(),
-        message:
-          "Starting model creation with comprehensive environment analysis",
-      },
-    );
 
     return {
       modelCreationId,
@@ -424,47 +431,11 @@ export class GoogleVertexProvider extends BaseProvider {
     modelCreationStartTime: number,
     modelCreationHrTimeStart: bigint,
   ): Promise<LanguageModelV1 | null> {
-    const anthropicCheckStartTime = process.hrtime.bigint();
     const isAnthropic = isAnthropicModel(modelName);
-
-    logger.debug(`[GoogleVertexProvider] 🤖 LOG_POINT_V002_ANTHROPIC_CHECK`, {
-      logPoint: "V002_ANTHROPIC_CHECK",
-      modelCreationId,
-      timestamp: new Date().toISOString(),
-      elapsedMs: Date.now() - modelCreationStartTime,
-      elapsedNs: (
-        process.hrtime.bigint() - modelCreationHrTimeStart
-      ).toString(),
-      anthropicCheckStartTimeNs: anthropicCheckStartTime.toString(),
-      modelName,
-      isAnthropicModel: isAnthropic,
-      modelNameLowerCase: modelName.toLowerCase(),
-      containsClaude: modelName.toLowerCase().includes("claude"),
-      anthropicModelPatterns: ["claude"],
-      message: "Checking if model is Anthropic-based",
-    });
 
     if (!isAnthropic) {
       return null;
     }
-
-    const anthropicModelStartTime = process.hrtime.bigint();
-    logger.debug(
-      `[GoogleVertexProvider] 🧠 LOG_POINT_V003_ANTHROPIC_MODEL_START`,
-      {
-        logPoint: "V003_ANTHROPIC_MODEL_START",
-        modelCreationId,
-        timestamp: new Date().toISOString(),
-        elapsedMs: Date.now() - modelCreationStartTime,
-        elapsedNs: (
-          process.hrtime.bigint() - modelCreationHrTimeStart
-        ).toString(),
-        anthropicModelStartTimeNs: anthropicModelStartTime.toString(),
-        modelName,
-        hasAnthropicSupport: hasAnthropicSupport(),
-        message: "Creating Anthropic model using vertexAnthropic provider",
-      },
-    );
 
     logger.debug("Creating Anthropic model using vertexAnthropic provider", {
       modelName,
@@ -481,63 +452,11 @@ export class GoogleVertexProvider extends BaseProvider {
       const anthropicModel = await this.createAnthropicModel(modelName);
 
       if (anthropicModel) {
-        const anthropicModelSuccessTime = process.hrtime.bigint();
-        const anthropicModelDurationNs =
-          anthropicModelSuccessTime - anthropicModelStartTime;
-
-        logger.debug(
-          `[GoogleVertexProvider] ✅ LOG_POINT_V004_ANTHROPIC_MODEL_SUCCESS`,
-          {
-            logPoint: "V004_ANTHROPIC_MODEL_SUCCESS",
-            modelCreationId,
-            timestamp: new Date().toISOString(),
-            elapsedMs: Date.now() - modelCreationStartTime,
-            elapsedNs: (
-              process.hrtime.bigint() - modelCreationHrTimeStart
-            ).toString(),
-            anthropicModelDurationNs: anthropicModelDurationNs.toString(),
-            anthropicModelDurationMs:
-              Number(anthropicModelDurationNs) / 1000000,
-            modelName,
-            hasAnthropicModel: !!anthropicModel,
-            anthropicModelType: typeof anthropicModel,
-            memoryUsageAfterAnthropicCreation: process.memoryUsage(),
-            message: "Anthropic model created successfully via vertexAnthropic",
-          },
-        );
-
         return anthropicModel;
       }
 
-      // Anthropic model creation returned null
-      const anthropicModelNullTime = process.hrtime.bigint();
-      const anthropicModelDurationNs =
-        anthropicModelNullTime - anthropicModelStartTime;
-
-      logger.warn(
-        `[GoogleVertexProvider] ⚠️ LOG_POINT_V005_ANTHROPIC_MODEL_NULL`,
-        {
-          logPoint: "V005_ANTHROPIC_MODEL_NULL",
-          modelCreationId,
-          timestamp: new Date().toISOString(),
-          elapsedMs: Date.now() - modelCreationStartTime,
-          elapsedNs: (
-            process.hrtime.bigint() - modelCreationHrTimeStart
-          ).toString(),
-          anthropicModelDurationNs: anthropicModelDurationNs.toString(),
-          anthropicModelDurationMs: Number(anthropicModelDurationNs) / 1000000,
-          modelName,
-          hasAnthropicModel: false,
-          fallbackToGoogle: true,
-          message:
-            "Anthropic model creation returned null - falling back to Google model",
-        },
-      );
+      // Anthropic model creation returned null, falling back to Google model
     } catch (error) {
-      const anthropicModelErrorTime = process.hrtime.bigint();
-      const anthropicModelDurationNs =
-        anthropicModelErrorTime - anthropicModelStartTime;
-
       logger.error(
         `[GoogleVertexProvider] ❌ LOG_POINT_V006_ANTHROPIC_MODEL_ERROR`,
         {
@@ -548,8 +467,6 @@ export class GoogleVertexProvider extends BaseProvider {
           elapsedNs: (
             process.hrtime.bigint() - modelCreationHrTimeStart
           ).toString(),
-          anthropicModelDurationNs: anthropicModelDurationNs.toString(),
-          anthropicModelDurationMs: Number(anthropicModelDurationNs) / 1000000,
           modelName,
           error: error instanceof Error ? error.message : String(error),
           errorName: error instanceof Error ? error.name : "UnknownError",
@@ -576,28 +493,7 @@ export class GoogleVertexProvider extends BaseProvider {
     modelCreationId: string,
     modelCreationStartTime: number,
     modelCreationHrTimeStart: bigint,
-    isAnthropic: boolean,
   ): Promise<LanguageModelV1> {
-    const googleModelStartTime = process.hrtime.bigint();
-    logger.debug(
-      `[GoogleVertexProvider] 🌐 LOG_POINT_V007_GOOGLE_MODEL_START`,
-      {
-        logPoint: "V007_GOOGLE_MODEL_START",
-        modelCreationId,
-        timestamp: new Date().toISOString(),
-        elapsedMs: Date.now() - modelCreationStartTime,
-        elapsedNs: (
-          process.hrtime.bigint() - modelCreationHrTimeStart
-        ).toString(),
-        googleModelStartTimeNs: googleModelStartTime.toString(),
-        modelName,
-        projectId: this.projectId,
-        location: this.location,
-        reason: isAnthropic ? "ANTHROPIC_FALLBACK" : "DIRECT_GOOGLE_MODEL",
-        message: "Creating fresh Google Vertex model with current settings",
-      },
-    );
-
     logger.debug("Creating Google Vertex model", {
       modelName,
       project: this.projectId,
@@ -639,7 +535,7 @@ export class GoogleVertexProvider extends BaseProvider {
     );
 
     try {
-      const vertexSettings = await createVertexSettings();
+      const vertexSettings = await createVertexSettings(this.location);
 
       const vertexSettingsEndTime = process.hrtime.bigint();
       const vertexSettingsDurationNs =
@@ -946,280 +842,28 @@ export class GoogleVertexProvider extends BaseProvider {
       modelCreationId,
       modelCreationStartTime,
       modelCreationHrTimeStart,
-      isAnthropicModel(modelName),
     );
   }
 
   // executeGenerate removed - BaseProvider handles all generation with tools
 
   /**
-   * Log stream execution start with comprehensive analysis
+   * Validate stream options
    */
-  private logStreamExecutionStart(
-    streamExecutionId: string,
-    streamExecutionStartTime: number,
-    streamExecutionHrTimeStart: bigint,
-    functionTag: string,
-    options: StreamOptions,
-    analysisSchema?: ZodType<unknown, ZodTypeDef, unknown> | Schema<unknown>,
-  ): void {
-    logger.info(
-      `[GoogleVertexProvider] 🎬 LOG_POINT_S001_STREAM_EXECUTION_START`,
-      {
-        logPoint: "S001_STREAM_EXECUTION_START",
-        streamExecutionId,
-        timestamp: new Date().toISOString(),
-        streamExecutionStartTime,
-        streamExecutionHrTimeStart: streamExecutionHrTimeStart.toString(),
-        functionTag,
-
-        // Input analysis
-        inputAnalysis: {
-          hasOptions: !!options,
-          optionsType: typeof options,
-          optionsKeys: options ? Object.keys(options) : [],
-          hasInputText: !!options?.input?.text,
-          inputTextLength: options?.input?.text?.length || 0,
-          inputTextPreview:
-            options?.input?.text?.substring(0, 200) || "NO_TEXT",
-          hasAnalysisSchema: !!analysisSchema,
-          schemaType: analysisSchema ? typeof analysisSchema : "NO_SCHEMA",
-          disableTools: options?.disableTools || false,
-          temperature: options?.temperature,
-          maxTokens: options?.maxTokens,
-        },
-
-        // Provider context
-        providerContext: {
-          modelName: this.modelName,
-          providerName: this.providerName,
-          projectId: this.projectId,
-          location: this.location,
-          defaultTimeout: this.defaultTimeout,
-        },
-
-        // Network environment
-        networkEnvironment: {
-          httpProxy:
-            process.env.HTTP_PROXY || process.env.http_proxy || "NOT_SET",
-          httpsProxy:
-            process.env.HTTPS_PROXY || process.env.https_proxy || "NOT_SET",
-          googleAppCreds:
-            process.env.GOOGLE_APPLICATION_CREDENTIALS || "NOT_SET",
-          hasGoogleServiceKey: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
-          expectedEndpoint: `https://${this.location}-aiplatform.googleapis.com`,
-          proxyConfigured: !!(
-            process.env.HTTP_PROXY ||
-            process.env.HTTPS_PROXY ||
-            process.env.http_proxy ||
-            process.env.https_proxy
-          ),
-        },
-
-        // Performance baseline
-        memoryUsage: process.memoryUsage(),
-        cpuUsage: process.cpuUsage(),
-        message: "Stream execution starting with comprehensive analysis",
-      },
-    );
-  }
-
-  /**
-   * Log timeout setup process
-   */
-  private logTimeoutSetup(
-    streamExecutionId: string,
-    streamExecutionStartTime: number,
-    streamExecutionHrTimeStart: bigint,
-    timeoutSetupStartTime: bigint,
-    timeout: number,
-  ): void {
-    logger.debug(`[GoogleVertexProvider] ⏰ LOG_POINT_S002_TIMEOUT_SETUP`, {
-      logPoint: "S002_TIMEOUT_SETUP",
-      streamExecutionId,
-      timestamp: new Date().toISOString(),
-      elapsedMs: Date.now() - streamExecutionStartTime,
-      elapsedNs: (
-        process.hrtime.bigint() - streamExecutionHrTimeStart
-      ).toString(),
-      timeoutSetupStartTimeNs: timeoutSetupStartTime.toString(),
-      timeout,
-      providerName: this.providerName,
-      streamType: "stream",
-      message: "Setting up timeout controller for stream execution",
-    });
-  }
-
-  /**
-   * Log successful timeout setup
-   */
-  private logTimeoutSetupSuccess(
-    streamExecutionId: string,
-    streamExecutionStartTime: number,
-    streamExecutionHrTimeStart: bigint,
-    timeoutSetupStartTime: bigint,
-    timeoutController: unknown,
-    timeout: number,
-  ): void {
-    const timeoutSetupEndTime = process.hrtime.bigint();
-    const timeoutSetupDurationNs = timeoutSetupEndTime - timeoutSetupStartTime;
-
-    logger.debug(
-      `[GoogleVertexProvider] ✅ LOG_POINT_S003_TIMEOUT_SETUP_SUCCESS`,
-      {
-        logPoint: "S003_TIMEOUT_SETUP_SUCCESS",
-        streamExecutionId,
-        timestamp: new Date().toISOString(),
-        elapsedMs: Date.now() - streamExecutionStartTime,
-        elapsedNs: (
-          process.hrtime.bigint() - streamExecutionHrTimeStart
-        ).toString(),
-        timeoutSetupDurationNs: timeoutSetupDurationNs.toString(),
-        timeoutSetupDurationMs: Number(timeoutSetupDurationNs) / 1000000,
-        hasTimeoutController: !!timeoutController,
-        timeoutValue: timeout,
-        message: "Timeout controller setup completed",
-      },
-    );
-  }
-
-  /**
-   * Log and perform stream options validation
-   */
-  private logAndValidateStreamOptions(
-    streamExecutionId: string,
-    streamExecutionStartTime: number,
-    streamExecutionHrTimeStart: bigint,
-    options: StreamOptions,
-  ): void {
-    const validationStartTime = process.hrtime.bigint();
-    logger.debug(`[GoogleVertexProvider] ✔️ LOG_POINT_S004_VALIDATION_START`, {
-      logPoint: "S004_VALIDATION_START",
-      streamExecutionId,
-      timestamp: new Date().toISOString(),
-      elapsedMs: Date.now() - streamExecutionStartTime,
-      elapsedNs: (
-        process.hrtime.bigint() - streamExecutionHrTimeStart
-      ).toString(),
-      validationStartTimeNs: validationStartTime.toString(),
-      message: "Starting stream options validation",
-    });
-
+  private validateStreamOptionsOnly(options: StreamOptions): void {
     this.validateStreamOptions(options);
-
-    const validationEndTime = process.hrtime.bigint();
-    const validationDurationNs = validationEndTime - validationStartTime;
-
-    logger.debug(
-      `[GoogleVertexProvider] ✅ LOG_POINT_S005_VALIDATION_SUCCESS`,
-      {
-        logPoint: "S005_VALIDATION_SUCCESS",
-        streamExecutionId,
-        timestamp: new Date().toISOString(),
-        elapsedMs: Date.now() - streamExecutionStartTime,
-        elapsedNs: (
-          process.hrtime.bigint() - streamExecutionHrTimeStart
-        ).toString(),
-        validationDurationNs: validationDurationNs.toString(),
-        validationDurationMs: Number(validationDurationNs) / 1000000,
-        message: "Stream options validation successful",
-      },
-    );
   }
 
-  /**
-   * Log start of message building process
-   */
-  private logMessageBuildStart(
-    streamExecutionId: string,
-    streamExecutionStartTime: number,
-    streamExecutionHrTimeStart: bigint,
-  ): bigint {
-    const messagesBuildStartTime = process.hrtime.bigint();
-    logger.debug(
-      `[GoogleVertexProvider] 📝 LOG_POINT_S006_MESSAGES_BUILD_START`,
-      {
-        logPoint: "S006_MESSAGES_BUILD_START",
-        streamExecutionId,
-        timestamp: new Date().toISOString(),
-        elapsedMs: Date.now() - streamExecutionStartTime,
-        elapsedNs: (
-          process.hrtime.bigint() - streamExecutionHrTimeStart
-        ).toString(),
-        messagesBuildStartTimeNs: messagesBuildStartTime.toString(),
-        message: "Starting message array building",
-      },
-    );
-    return messagesBuildStartTime;
-  }
-
-  /**
-   * Log successful message building
-   */
-  private logMessageBuildSuccess(
-    streamExecutionId: string,
-    streamExecutionStartTime: number,
-    streamExecutionHrTimeStart: bigint,
-    messagesBuildStartTime: bigint,
-    messages: unknown,
-  ): void {
-    const messagesBuildEndTime = process.hrtime.bigint();
-    const messagesBuildDurationNs =
-      messagesBuildEndTime - messagesBuildStartTime;
-
-    logger.debug(
-      `[GoogleVertexProvider] ✅ LOG_POINT_S007_MESSAGES_BUILD_SUCCESS`,
-      {
-        logPoint: "S007_MESSAGES_BUILD_SUCCESS",
-        streamExecutionId,
-        timestamp: new Date().toISOString(),
-        elapsedMs: Date.now() - streamExecutionStartTime,
-        elapsedNs: (
-          process.hrtime.bigint() - streamExecutionHrTimeStart
-        ).toString(),
-        messagesBuildDurationNs: messagesBuildDurationNs.toString(),
-        messagesBuildDurationMs: Number(messagesBuildDurationNs) / 1000000,
-        messagesCount: Array.isArray(messages) ? messages.length : 0,
-        messagesType: typeof messages,
-        hasMessages: !!messages,
-        message: "Message array built successfully",
-      },
-    );
-  }
-
-  /* eslint-disable-next-line max-lines-per-function */
   protected async executeStream(
     options: StreamOptions,
     analysisSchema?: ZodType<unknown, ZodTypeDef, unknown> | Schema<unknown>,
   ): Promise<StreamResult> {
     // Initialize stream execution tracking
-    const streamExecutionId = `vertex-stream-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
-    const streamExecutionStartTime = Date.now();
-    const streamExecutionHrTimeStart = process.hrtime.bigint();
     const functionTag = "GoogleVertexProvider.executeStream";
     let chunkCount = 0;
 
-    // Log stream execution start
-    this.logStreamExecutionStart(
-      streamExecutionId,
-      streamExecutionStartTime,
-      streamExecutionHrTimeStart,
-      functionTag,
-      options,
-      analysisSchema,
-    );
-
     // Setup timeout controller
-    const timeoutSetupStartTime = process.hrtime.bigint();
     const timeout = this.getTimeout(options);
-
-    this.logTimeoutSetup(
-      streamExecutionId,
-      streamExecutionStartTime,
-      streamExecutionHrTimeStart,
-      timeoutSetupStartTime,
-      timeout,
-    );
 
     const timeoutController = createTimeoutController(
       timeout,
@@ -1227,153 +871,19 @@ export class GoogleVertexProvider extends BaseProvider {
       "stream",
     );
 
-    this.logTimeoutSetupSuccess(
-      streamExecutionId,
-      streamExecutionStartTime,
-      streamExecutionHrTimeStart,
-      timeoutSetupStartTime,
-      timeoutController,
-      timeout,
-    );
-
     try {
-      // Validate stream options with logging
-      this.logAndValidateStreamOptions(
-        streamExecutionId,
-        streamExecutionStartTime,
-        streamExecutionHrTimeStart,
-        options,
-      );
+      // Validate stream options
+      this.validateStreamOptionsOnly(options);
 
-      // Build messages with logging
-      const messagesBuildStartTime = this.logMessageBuildStart(
-        streamExecutionId,
-        streamExecutionStartTime,
-        streamExecutionHrTimeStart,
-      );
+      // Build message array from options with multimodal support
+      // Using protected helper from BaseProvider to eliminate code duplication
+      const messages = await this.buildMessagesForStream(options);
 
-      // Build message array from options
-      const messages = buildMessagesArray(options);
-
-      this.logMessageBuildSuccess(
-        streamExecutionId,
-        streamExecutionStartTime,
-        streamExecutionHrTimeStart,
-        messagesBuildStartTime,
-        messages,
-      );
-
-      // Log stream request details
-      logger.debug(
-        `[GoogleVertexProvider] 🚀 LOG_POINT_S008_STREAM_REQUEST_DETAILS`,
-        {
-          logPoint: "S008_STREAM_REQUEST_DETAILS",
-          streamExecutionId,
-          streamRequestDetails: {
-            modelName: this.modelName,
-            promptLength:
-              typeof options.input?.text === "string"
-                ? options.input.text.length
-                : 0,
-            hasSchema: !!analysisSchema,
-            messagesCount: Array.isArray(messages) ? messages.length : 0,
-            temperature: options?.temperature,
-            maxTokens: options?.maxTokens,
-            disableTools: options?.disableTools || false,
-          },
-          message: "Starting comprehensive stream request processing",
-        },
-      );
-
-      // 🚀 EXHAUSTIVE LOGGING POINT S009: MODEL CREATION FOR STREAM
-      const modelCreationStartTime = process.hrtime.bigint();
-      logger.debug(
-        `[GoogleVertexProvider] 🏭 LOG_POINT_S009_MODEL_CREATION_FOR_STREAM`,
-        {
-          logPoint: "S009_MODEL_CREATION_FOR_STREAM",
-          streamExecutionId,
-          timestamp: new Date().toISOString(),
-          elapsedMs: Date.now() - streamExecutionStartTime,
-          elapsedNs: (
-            process.hrtime.bigint() - streamExecutionHrTimeStart
-          ).toString(),
-          modelCreationStartTimeNs: modelCreationStartTime.toString(),
-          requestedModel: this.modelName,
-          message:
-            "Starting model creation for stream execution (this will include network setup)",
-        },
-      );
-
-      const model = await this.getModel(); // This is where network connection happens!
-
-      const modelCreationEndTime = process.hrtime.bigint();
-      const modelCreationDurationNs =
-        modelCreationEndTime - modelCreationStartTime;
-
-      logger.info(
-        `[GoogleVertexProvider] ✅ LOG_POINT_S010_MODEL_CREATION_SUCCESS`,
-        {
-          logPoint: "S010_MODEL_CREATION_SUCCESS",
-          streamExecutionId,
-          timestamp: new Date().toISOString(),
-          elapsedMs: Date.now() - streamExecutionStartTime,
-          elapsedNs: (
-            process.hrtime.bigint() - streamExecutionHrTimeStart
-          ).toString(),
-          modelCreationDurationNs: modelCreationDurationNs.toString(),
-          modelCreationDurationMs: Number(modelCreationDurationNs) / 1000000,
-          hasModel: !!model,
-          modelType: typeof model,
-          message:
-            "Model creation completed successfully - network connection established",
-        },
-      );
-
-      // 🚀 EXHAUSTIVE LOGGING POINT S011: TOOLS SETUP FOR STREAMING
-      const toolsSetupStartTime = process.hrtime.bigint();
-      logger.debug(
-        `[GoogleVertexProvider] 🛠️ LOG_POINT_S011_TOOLS_SETUP_START`,
-        {
-          logPoint: "S011_TOOLS_SETUP_START",
-          streamExecutionId,
-          timestamp: new Date().toISOString(),
-          elapsedMs: Date.now() - streamExecutionStartTime,
-          elapsedNs: (
-            process.hrtime.bigint() - streamExecutionHrTimeStart
-          ).toString(),
-          toolsSetupStartTimeNs: toolsSetupStartTime.toString(),
-          disableTools: options?.disableTools || false,
-          supportsTools: this.supportsTools(),
-          message: "Setting up tools for streaming",
-        },
-      );
+      const model = await this.getAISDKModelWithMiddleware(options); // This is where network connection happens!
 
       // Get all available tools (direct + MCP + external) for streaming
       const shouldUseTools = !options.disableTools && this.supportsTools();
       const tools = shouldUseTools ? await this.getAllTools() : {};
-
-      const toolsSetupEndTime = process.hrtime.bigint();
-      const toolsSetupDurationNs = toolsSetupEndTime - toolsSetupStartTime;
-
-      logger.debug(
-        `[GoogleVertexProvider] ✅ LOG_POINT_S012_TOOLS_SETUP_SUCCESS`,
-        {
-          logPoint: "S012_TOOLS_SETUP_SUCCESS",
-          streamExecutionId,
-          timestamp: new Date().toISOString(),
-          elapsedMs: Date.now() - streamExecutionStartTime,
-          elapsedNs: (
-            process.hrtime.bigint() - streamExecutionHrTimeStart
-          ).toString(),
-          toolsSetupDurationNs: toolsSetupDurationNs.toString(),
-          toolsSetupDurationMs: Number(toolsSetupDurationNs) / 1000000,
-          shouldUseTools,
-          toolCount: Object.keys(tools).length,
-          toolNames: Object.keys(tools),
-          hasTools: Object.keys(tools).length > 0,
-          message: "Tools setup completed for streaming",
-        },
-      );
 
       logger.debug(`${functionTag}: Tools for streaming`, {
         shouldUseTools,
@@ -1397,7 +907,6 @@ export class GoogleVertexProvider extends BaseProvider {
         messages: messages,
         temperature: options.temperature,
         ...(maxTokens && { maxTokens }),
-        // Add tools support for streaming
         ...(shouldUseTools &&
           Object.keys(tools).length > 0 && {
             tools,
@@ -1405,6 +914,7 @@ export class GoogleVertexProvider extends BaseProvider {
             maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
           }),
         abortSignal: timeoutController?.controller.signal,
+        experimental_telemetry: this.getStreamTelemetryConfig(options),
 
         onError: (event: { error: unknown }) => {
           const error = event.error;
@@ -1431,6 +941,26 @@ export class GoogleVertexProvider extends BaseProvider {
 
         onChunk: () => {
           chunkCount++;
+        },
+
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          logger.info("Tool execution completed", { toolResults, toolCalls });
+
+          // Handle tool execution storage
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn(
+              "[GoogleVertexProvider] Failed to store tool executions",
+              {
+                provider: this.providerName,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+          });
         },
       };
 
@@ -1752,8 +1282,13 @@ export class GoogleVertexProvider extends BaseProvider {
         supportedRegions: [
           "us-central1",
           "us-east4",
+          "us-east5",
+          "us-west1",
+          "us-west4",
           "europe-west1",
+          "europe-west4",
           "asia-southeast1",
+          "asia-northeast1",
         ],
         solution: "Set GOOGLE_CLOUD_LOCATION to a supported region",
       });
@@ -1768,6 +1303,7 @@ export class GoogleVertexProvider extends BaseProvider {
         modelName,
         issue: modelValidation.issue,
         recommendedModels: [
+          "claude-sonnet-4-5@20250929",
           "claude-sonnet-4@20250514",
           "claude-opus-4@20250514",
           "claude-3-5-sonnet-20241022",
@@ -1789,7 +1325,9 @@ export class GoogleVertexProvider extends BaseProvider {
         },
       );
 
-      const vertexAnthropicSettings = await createVertexAnthropicSettings();
+      const vertexAnthropicSettings = await createVertexAnthropicSettings(
+        this.location,
+      );
 
       // 7. Settings Validation
       if (
@@ -2011,10 +1549,12 @@ export class GoogleVertexProvider extends BaseProvider {
 
     result.region = region;
 
-    // Validate region format
-    const regionPattern = /^[a-z]+-[a-z]+\d+$/;
+    // Validate region format (regional format like us-central1 or global endpoint)
+    const regionPattern = /^([a-z]+-[a-z]+\d+|global)$/;
     if (!regionPattern.test(region)) {
-      result.issues.push(`Invalid region format: ${region}`);
+      result.issues.push(
+        `Invalid region format: ${region} (expected format: 'us-central1' or 'global')`,
+      );
       result.isValid = false;
     }
 
@@ -2031,6 +1571,7 @@ export class GoogleVertexProvider extends BaseProvider {
     const supportedRegions = [
       "us-central1",
       "us-east4",
+      "us-east5",
       "us-west1",
       "us-west4",
       "europe-west1",
@@ -2067,7 +1608,10 @@ export class GoogleVertexProvider extends BaseProvider {
     // Validate against known Claude model patterns
     const validPatterns = [
       /^claude-sonnet-4@\d{8}$/,
+      /^claude-sonnet-4-5@\d{8}$/,
       /^claude-opus-4@\d{8}$/,
+      /^claude-opus-4-1@\d{8}$/,
+      /^claude-3-7-sonnet@\d{8}$/,
       /^claude-3-5-sonnet-\d{8}$/,
       /^claude-3-5-haiku-\d{8}$/,
       /^claude-3-sonnet-\d{8}$/,
@@ -2382,14 +1926,19 @@ export class GoogleVertexProvider extends BaseProvider {
   private getModelSuggestions(requestedModel: string | undefined): string {
     const availableModels = {
       google: [
+        "gemini-3-pro-preview-11-2025",
+        "gemini-3-pro-latest",
+        "gemini-3-pro-preview",
         "gemini-2.5-pro",
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
         "gemini-2.0-flash-001",
+        "gemini-2.0-flash-lite",
         "gemini-1.5-pro",
         "gemini-1.5-flash",
       ],
       claude: [
+        "claude-sonnet-4-5@20250929",
         "claude-sonnet-4@20250514",
         "claude-opus-4@20250514",
         "claude-3-5-sonnet-20241022",

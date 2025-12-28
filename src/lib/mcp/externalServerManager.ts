@@ -15,6 +15,8 @@ import { mcpLogger } from "../utils/logger.js";
 import { MCPClientFactory } from "./mcpClientFactory.js";
 import { ToolDiscoveryService } from "./toolDiscoveryService.js";
 import { toolRegistry } from "./toolRegistry.js";
+import type { HITLManager } from "../hitl/hitlManager.js";
+import { HITLUserRejectedError, HITLTimeoutError } from "../hitl/hitlErrors.js";
 import type {
   ExternalMCPServerInstance,
   ExternalMCPServerStatus,
@@ -90,6 +92,17 @@ function isValidExternalMCPServerConfig(
     return false;
   }
   const record = config as UnknownRecord;
+
+  // Validate blockedTools array contains only strings
+  if (record.blockedTools !== undefined) {
+    if (!Array.isArray(record.blockedTools)) {
+      return false;
+    }
+    if (!record.blockedTools.every((item) => typeof item === "string")) {
+      return false;
+    }
+  }
+
   return (
     typeof record.command === "string" &&
     (record.args === undefined || Array.isArray(record.args)) &&
@@ -153,6 +166,7 @@ export class ExternalServerManager extends EventEmitter {
   private isShuttingDown = false;
   private toolDiscovery: ToolDiscoveryService;
   private enableMainRegistryIntegration: boolean;
+  private hitlManager?: HITLManager; // Optional HITL manager for safety mechanisms
 
   constructor(
     config: ExternalMCPManagerConfig = {},
@@ -172,9 +186,9 @@ export class ExternalServerManager extends EventEmitter {
       logLevel: config.logLevel ?? "info",
     };
 
-    // Enable main tool registry integration by default
+    // Disable main tool registry integration by default to prevent automatic tool execution
     this.enableMainRegistryIntegration =
-      options.enableMainRegistryIntegration ?? true;
+      options.enableMainRegistryIntegration ?? false;
 
     // Initialize tool discovery service
     this.toolDiscovery = new ToolDiscoveryService();
@@ -192,6 +206,30 @@ export class ExternalServerManager extends EventEmitter {
     process.on("SIGINT", () => this.shutdown());
     process.on("SIGTERM", () => this.shutdown());
     process.on("beforeExit", () => this.shutdown());
+  }
+
+  /**
+   * Set HITL manager for human-in-the-loop safety mechanisms
+   * @param hitlManager - HITL manager instance (optional, can be undefined to disable)
+   */
+  setHITLManager(hitlManager?: HITLManager): void {
+    this.hitlManager = hitlManager;
+    if (hitlManager && hitlManager.isEnabled()) {
+      mcpLogger.info(
+        "[ExternalServerManager] HITL safety mechanisms enabled for external tool execution",
+      );
+    } else {
+      mcpLogger.debug(
+        "[ExternalServerManager] HITL safety mechanisms disabled or not configured",
+      );
+    }
+  }
+
+  /**
+   * Get current HITL manager
+   */
+  getHITLManager(): HITLManager | undefined {
+    return this.hitlManager;
   }
 
   /**
@@ -299,6 +337,9 @@ export class ExternalServerManager extends EventEmitter {
                 typeof serverConfig.url === "string"
                   ? serverConfig.url
                   : undefined,
+              blockedTools: Array.isArray(serverConfig.blockedTools)
+                ? (serverConfig.blockedTools as string[])
+                : undefined,
               metadata: safeMetadataConversion(serverConfig.metadata),
             };
 
@@ -448,6 +489,9 @@ export class ExternalServerManager extends EventEmitter {
               typeof serverConfig.url === "string"
                 ? serverConfig.url
                 : undefined,
+            blockedTools: Array.isArray(serverConfig.blockedTools)
+              ? (serverConfig.blockedTools as string[])
+              : undefined,
             metadata: safeMetadataConversion(serverConfig.metadata),
           };
 
@@ -566,6 +610,7 @@ export class ExternalServerManager extends EventEmitter {
       args: config.args,
       env: config.env,
       tools: [], // Will be populated after server connection
+      blockedTools: config.blockedTools,
       metadata: {
         category: "external" as MCPServerCategory,
         // Store additional ExternalMCPServerConfig fields in metadata
@@ -641,6 +686,7 @@ export class ExternalServerManager extends EventEmitter {
         autoRestart: serverInfo.metadata?.autoRestart as boolean,
         cwd: serverInfo.metadata?.cwd as string,
         url: serverInfo.metadata?.url as string,
+        blockedTools: serverInfo.blockedTools,
         metadata: safeMetadataConversion(serverInfo.metadata),
       };
 
@@ -1407,7 +1453,20 @@ export class ExternalServerManager extends EventEmitter {
         instance.toolsMap.clear();
         instance.toolsArray = undefined;
         instance.tools = [];
+
+        const blockedTools = instance.blockedTools || [];
+        let blockedCount = 0;
+
         for (const tool of discoveryResult.tools) {
+          // Check if tool is blocked
+          if (blockedTools.includes(tool.name)) {
+            mcpLogger.info(
+              `[ExternalServerManager] Blocking tool '${tool.name}' from server '${serverId}' (configured in blockedTools)`,
+            );
+            blockedCount++;
+            continue; // Skip blocked tools
+          }
+
           instance.toolsMap.set(tool.name, tool);
           instance.tools.push({
             name: tool.name,
@@ -1417,7 +1476,7 @@ export class ExternalServerManager extends EventEmitter {
         }
 
         mcpLogger.info(
-          `[ExternalServerManager] Discovered ${discoveryResult.toolCount} tools for ${serverId}`,
+          `[ExternalServerManager] Discovered ${discoveryResult.toolCount} tools for ${serverId} (${blockedCount} blocked, ${instance.toolsMap.size} available)`,
         );
       } else {
         mcpLogger.warn(
@@ -1565,15 +1624,96 @@ export class ExternalServerManager extends EventEmitter {
       );
     }
 
+    // Check if tool is blocked
+    const blockedTools = instance.blockedTools || [];
+    if (blockedTools.includes(toolName)) {
+      throw new Error(
+        `Tool '${toolName}' is blocked on server '${serverId}' by configuration`,
+      );
+    }
+
     const startTime = Date.now();
 
     try {
-      // Execute tool through discovery service
+      // HITL Safety Check: Request confirmation if required
+      let finalParameters = parameters;
+      if (this.hitlManager && this.hitlManager.isEnabled()) {
+        const requiresConfirmation = this.hitlManager.requiresConfirmation(
+          toolName,
+          parameters,
+        );
+
+        if (requiresConfirmation) {
+          mcpLogger.info(
+            `[ExternalServerManager] External tool '${toolName}' on server '${serverId}' requires HITL confirmation`,
+          );
+
+          try {
+            const confirmationResult =
+              await this.hitlManager.requestConfirmation(toolName, parameters, {
+                serverId: serverId,
+                sessionId: `external-${serverId}-${Date.now()}`,
+                userId: undefined, // External tools don't have user context by default
+              });
+
+            if (!confirmationResult.approved) {
+              // User rejected the tool execution
+              throw new HITLUserRejectedError(
+                `External tool execution rejected by user: ${confirmationResult.reason || "No reason provided"}`,
+                toolName,
+                confirmationResult.reason,
+              );
+            }
+
+            // User approved - use modified arguments if provided
+            if (confirmationResult.modifiedArguments !== undefined) {
+              finalParameters =
+                confirmationResult.modifiedArguments as JsonObject;
+              mcpLogger.info(
+                `[ExternalServerManager] External tool '${toolName}' arguments modified by user`,
+              );
+            }
+
+            mcpLogger.info(
+              `[ExternalServerManager] External tool '${toolName}' approved for execution (response time: ${confirmationResult.responseTime}ms)`,
+            );
+          } catch (error) {
+            if (error instanceof HITLTimeoutError) {
+              // Timeout occurred - user didn't respond in time
+              mcpLogger.warn(
+                `[ExternalServerManager] External tool '${toolName}' execution timed out waiting for user confirmation`,
+              );
+              throw error;
+            } else if (error instanceof HITLUserRejectedError) {
+              // User explicitly rejected
+              mcpLogger.info(
+                `[ExternalServerManager] External tool '${toolName}' execution rejected by user`,
+              );
+              throw error;
+            } else {
+              // Other HITL error (configuration, system error, etc.)
+              mcpLogger.error(
+                `[ExternalServerManager] HITL confirmation failed for external tool '${toolName}':`,
+                error,
+              );
+              throw new Error(
+                `HITL confirmation failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+        } else {
+          mcpLogger.debug(
+            `[ExternalServerManager] External tool '${toolName}' does not require HITL confirmation`,
+          );
+        }
+      }
+
+      // Execute tool through discovery service (with potentially modified parameters)
       const result = await this.toolDiscovery.executeTool(
         toolName,
         serverId,
         instance.client,
-        parameters,
+        finalParameters,
         {
           timeout: options?.timeout || this.config.defaultTimeout,
         },

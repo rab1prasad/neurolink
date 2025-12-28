@@ -12,8 +12,7 @@ import { AIProviderFactory } from "./core/factory.js";
 export { AIProviderFactory };
 export type {
   AIProvider,
-  AIProviderName,
-  ProviderConfig,
+  AIModelProviderConfig,
   StreamingOptions,
   ProviderAttempt,
   SupportedModelName,
@@ -33,12 +32,14 @@ export { validateTool } from "./sdk/toolRegistration.js";
 export type { ToolResult, ToolDefinition } from "./types/tools.js";
 
 // Model enums
+export { DEFAULT_PROVIDER_CONFIGS } from "./types/index.js";
+
 export {
+  AIProviderName,
   BedrockModels,
   OpenAIModels,
   VertexModels,
-  DEFAULT_PROVIDER_CONFIGS,
-} from "./types/index.js";
+} from "./constants/enums.js";
 
 // Utility exports
 export {
@@ -52,9 +53,38 @@ export { dynamicModelProvider } from "./core/dynamicModels.js";
 export type { DynamicModelConfig, ModelRegistry } from "./types/modelTypes.js";
 
 // Main NeuroLink wrapper class and diagnostic types
-export { NeuroLink } from "./neurolink.js";
-export type { ProviderStatus, MCPStatus } from "./neurolink.js";
+import { NeuroLink } from "./neurolink.js";
+export { NeuroLink };
 export type { MCPServerInfo } from "./types/mcpTypes.js";
+
+// Observability configuration types
+export type {
+  ObservabilityConfig,
+  LangfuseConfig,
+  OpenTelemetryConfig,
+} from "./types/observability.js";
+
+export { buildObservabilityConfigFromEnv } from "./utils/observabilityHelpers.js";
+
+import {
+  initializeOpenTelemetry,
+  shutdownOpenTelemetry,
+  flushOpenTelemetry,
+  getLangfuseHealthStatus,
+  setLangfuseContext,
+} from "./services/server/ai/observability/instrumentation.js";
+import {
+  initializeTelemetry as init,
+  getTelemetryStatus as getStatus,
+} from "./telemetry/index.js";
+
+export {
+  initializeOpenTelemetry,
+  shutdownOpenTelemetry,
+  flushOpenTelemetry,
+  getLangfuseHealthStatus,
+  setLangfuseContext,
+};
 
 // Middleware exports
 export type {
@@ -167,14 +197,15 @@ export {
   mcpLogger,
 } from "./mcp/index.js";
 
+export type { McpMetadata, DiscoveredMcp } from "./types/mcpTypes.js";
+
 export type {
-  McpMetadata,
   ExecutionContext,
-  DiscoveredMcp,
   ToolInfo,
   ToolExecutionResult,
-  LogLevel,
-} from "./mcp/index.js";
+} from "./types/tools.js";
+
+export type { LogLevel } from "./types/utilities.js";
 
 // ============================================================================
 // REAL-TIME SERVICES & TELEMETRY - Enterprise Platform Features
@@ -184,24 +215,24 @@ export type {
 // export { createEnhancedChatService } from './chat/index.js';
 // export type * from './services/types.js';
 
-// Optional Telemetry (Phase 2) - Conditional export based on feature flag
+// Optional Telemetry (Phase 2) - Telemetry service initialization
 export async function initializeTelemetry(): Promise<boolean> {
-  if (process.env.NEUROLINK_TELEMETRY_ENABLED === "true") {
-    const { initializeTelemetry: init } = await import("./telemetry/index.js");
+  try {
     const result = await init();
-    return !!result; // Convert TelemetryService to boolean
+    return !!result;
+  } catch {
+    return false;
   }
-  return Promise.resolve(false);
 }
 
-export function getTelemetryStatus(): {
+export async function getTelemetryStatus(): Promise<{
   enabled: boolean;
   initialized: boolean;
-} {
-  if (process.env.NEUROLINK_TELEMETRY_ENABLED === "true") {
-    return { enabled: true, initialized: false };
-  }
-  return { enabled: false, initialized: false };
+  endpoint?: string;
+  service?: string;
+  version?: string;
+}> {
+  return getStatus();
 }
 
 // ============================================================================
@@ -235,7 +266,7 @@ export type {
 export async function generateText(
   options: import("./types/index.js").TextGenerationOptions,
 ): Promise<import("./types/index.js").TextGenerationResult> {
-  // Import neurolink instance to avoid circular dependencies
-  const { neurolink } = await import("./neurolink.js");
+  // Create instance on-demand without auto-instantiation
+  const neurolink = new NeuroLink();
   return await neurolink.generateText(options);
 }

@@ -112,3 +112,11 @@ test-directTools-temp/
 site/
 _site/
 quality-metrics.json
+
+# Claude Code
+.claude/
+.claude/settings.local.json
+
+# Security Files
+*.key
+*.pem

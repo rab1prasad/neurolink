@@ -7,18 +7,7 @@
 import fs from "fs";
 import chalk from "chalk";
 import { logger } from "../../lib/utils/logger.js";
-
-export interface EnvBackupResult {
-  backupPath?: string;
-  existed: boolean;
-}
-
-export interface EnvUpdateResult {
-  backup: EnvBackupResult;
-  updated: string[];
-  added: string[];
-  unchanged: string[];
-}
+import type { EnvBackupResult, EnvUpdateResult } from "../../lib/types/cli.js";
 
 /**
  * Create a timestamped backup of the existing .env file
@@ -91,6 +80,7 @@ export function parseEnvFile(content: string): Record<string, string> {
 export function generateEnvContent(
   envVars: Record<string, string>,
   existingContent?: string,
+  keysToDelete: string[] = [],
 ): string {
   const lines: string[] = [];
   const _existingVars = existingContent ? parseEnvFile(existingContent) : {};
@@ -116,6 +106,11 @@ export function generateEnvContent(
       }
 
       const key = trimmedLine.substring(0, equalIndex).trim();
+
+      // Skip keys that should be deleted
+      if (keysToDelete.includes(key)) {
+        continue; // Skip this line - delete the key
+      }
 
       if (Object.prototype.hasOwnProperty.call(envVars, key)) {
         // Update existing variable
@@ -153,12 +148,14 @@ export function updateEnvFile(
   newVars: Record<string, string>,
   envPath: string = ".env",
   createBackup: boolean = true,
+  keysToDelete: string[] = [],
 ): EnvUpdateResult {
   const result: EnvUpdateResult = {
     backup: { existed: false },
     updated: [],
     added: [],
     unchanged: [],
+    deleted: [],
   };
 
   // Create backup if requested and file exists
@@ -175,6 +172,13 @@ export function updateEnvFile(
     _existingVars = parseEnvFile(existingContent);
   }
 
+  // Track keys to be deleted
+  for (const key of keysToDelete) {
+    if (Object.prototype.hasOwnProperty.call(_existingVars, key)) {
+      result.deleted.push(key);
+    }
+  }
+
   // Categorize changes
   for (const [key, value] of Object.entries(newVars)) {
     if (Object.prototype.hasOwnProperty.call(_existingVars, key)) {
@@ -189,7 +193,7 @@ export function updateEnvFile(
   }
 
   // Generate new content
-  const newContent = generateEnvContent(newVars, existingContent);
+  const newContent = generateEnvContent(newVars, existingContent, keysToDelete);
 
   // Write updated file
   try {
@@ -234,6 +238,14 @@ export function displayEnvUpdateSummary(
     );
   }
 
+  if (result.deleted.length > 0) {
+    logger.always(
+      chalk.red(
+        `🗑️ Deleted ${result.deleted.length} variables: ${result.deleted.join(", ")}`,
+      ),
+    );
+  }
+
   if (result.unchanged.length > 0) {
     logger.always(
       chalk.gray(
@@ -242,7 +254,8 @@ export function displayEnvUpdateSummary(
     );
   }
 
-  const totalChanges = result.added.length + result.updated.length;
+  const totalChanges =
+    result.added.length + result.updated.length + result.deleted.length;
   if (totalChanges > 0) {
     logger.always(
       chalk.blue(`📝 Environment file updated with ${totalChanges} changes`),

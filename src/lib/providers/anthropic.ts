@@ -1,8 +1,7 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { streamText, type LanguageModelV1 } from "ai";
 import type { ValidationSchema } from "../types/typeAliases.js";
-import type { AIProviderName } from "../types/index.js";
-import { AnthropicModels } from "../types/index.js";
+import { AIProviderName, AnthropicModels } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import type { UnknownRecord, JsonValue } from "../types/common.js";
 import type { NeuroLink } from "../neurolink.js";
@@ -21,7 +20,6 @@ import {
   createAnthropicConfig,
   getProviderModel,
 } from "../utils/providerConfig.js";
-import { buildMessagesArray } from "../utils/messageBuilder.js";
 import { createProxyFetch } from "../proxy/proxyFetch.js";
 
 // Configuration helpers - now using consolidated utility
@@ -158,11 +156,12 @@ export class AnthropicProvider extends BaseProvider {
       const shouldUseTools = !options.disableTools && this.supportsTools();
       const tools = shouldUseTools ? await this.getAllTools() : {};
 
-      // Build message array from options
-      const messages = buildMessagesArray(options);
-
+      // Build message array from options with multimodal support
+      // Using protected helper from BaseProvider to eliminate code duplication
+      const messages = await this.buildMessagesForStream(options);
+      const model = await this.getAISDKModelWithMiddleware(options);
       const result = await streamText({
-        model: this.model,
+        model: model,
         messages: messages,
         temperature: options.temperature,
         maxTokens: options.maxTokens, // No default limit - unlimited unless specified
@@ -170,6 +169,20 @@ export class AnthropicProvider extends BaseProvider {
         maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
         toolChoice: shouldUseTools ? "auto" : "none",
         abortSignal: timeoutController?.controller.signal,
+        experimental_telemetry: this.getStreamTelemetryConfig(options),
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn("[AnthropicProvider] Failed to store tool executions", {
+              provider: this.providerName,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+        },
       });
 
       timeoutController?.cleanup();

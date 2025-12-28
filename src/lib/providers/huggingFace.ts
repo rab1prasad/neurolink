@@ -7,18 +7,18 @@ import {
   type ToolSet,
   type ToolChoice,
 } from "ai";
-import type { AIProviderName } from "../types/index.js";
+import { AIProviderName } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import { BaseProvider } from "../core/baseProvider.js";
 import { logger } from "../utils/logger.js";
 import { createTimeoutController, TimeoutError } from "../utils/timeout.js";
 import type { UnknownRecord } from "../types/common.js";
+import { DEFAULT_MAX_STEPS } from "../core/constants.js";
 import {
   validateApiKey,
   createHuggingFaceConfig,
   getProviderModel,
 } from "../utils/providerConfig.js";
-import { buildMessagesArray } from "../utils/messageBuilder.js";
 import { createProxyFetch } from "../proxy/proxyFetch.js";
 
 // Configuration helpers - now using consolidated utility
@@ -162,17 +162,35 @@ export class HuggingFaceProvider extends BaseProvider {
       // Enhanced tool handling for HuggingFace models
       const streamOptions = this.prepareStreamOptions(options, analysisSchema);
 
-      // Build message array from options
-      const messages = buildMessagesArray(options);
+      // Build message array from options with multimodal support
+      // Using protected helper from BaseProvider to eliminate code duplication
+      const messages = await this.buildMessagesForStream(options);
 
       const result = await streamText({
         model: this.model,
         messages: messages,
         temperature: options.temperature,
         maxTokens: options.maxTokens, // No default limit - unlimited unless specified
+        maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
         tools: streamOptions.tools as ToolSet, // Tools format conversion handled by prepareStreamOptions
         toolChoice: streamOptions.toolChoice as ToolChoice<ToolSet>, // Tool choice handled by prepareStreamOptions
         abortSignal: timeoutController?.controller.signal,
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn(
+              "[HuggingFaceProvider] Failed to store tool executions",
+              {
+                provider: this.providerName,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+          });
+        },
       });
 
       timeoutController?.cleanup();

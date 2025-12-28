@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ZodType, ZodTypeDef } from "zod";
-import { streamText, type Schema, type LanguageModelV1 } from "ai";
-import type { AIProviderName } from "../types/index.js";
+import { streamText, Output, type Schema, type LanguageModelV1 } from "ai";
+import { AIProviderName } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import type { UnknownRecord } from "../types/common.js";
 import type { NeuroLink } from "../neurolink.js";
@@ -10,7 +10,7 @@ import { logger } from "../utils/logger.js";
 import { createTimeoutController, TimeoutError } from "../utils/timeout.js";
 import { getProviderModel } from "../utils/providerConfig.js";
 import { streamAnalyticsCollector } from "../core/streamAnalytics.js";
-import { buildMessagesArray } from "../utils/messageBuilder.js";
+import { DEFAULT_MAX_STEPS } from "../core/constants.js";
 import { createProxyFetch } from "../proxy/proxyFetch.js";
 
 // Configuration helpers
@@ -161,11 +161,12 @@ export class LiteLLMProvider extends BaseProvider {
    */
   protected async executeStream(
     options: StreamOptions,
-    _analysisSchema?: ZodType<unknown, ZodTypeDef, unknown> | Schema<unknown>,
+    analysisSchema?: ZodType<unknown, ZodTypeDef, unknown> | Schema<unknown>,
   ): Promise<StreamResult> {
     this.validateStreamOptions(options);
 
     const startTime = Date.now();
+    let chunkCount = 0; // Track chunk count for debugging
     const timeout = this.getTimeout(options);
     const timeoutController = createTimeoutController(
       timeout,
@@ -174,27 +175,167 @@ export class LiteLLMProvider extends BaseProvider {
     );
 
     try {
-      // Build message array from options
-      const messages = buildMessagesArray(options);
+      // Build message array from options with multimodal support
+      // Using protected helper from BaseProvider to eliminate code duplication
+      const messages = await this.buildMessagesForStream(options);
 
-      const result = streamText({
-        model: this.model,
+      const model = await this.getAISDKModelWithMiddleware(options); // This is where network connection happens!
+
+      // Get all available tools (direct + MCP + external) for streaming - matching Vertex pattern
+      const shouldUseTools = !options.disableTools && this.supportsTools();
+      const tools = shouldUseTools ? await this.getAllTools() : {};
+
+      logger.debug(`LiteLLM: Tools for streaming`, {
+        shouldUseTools,
+        toolCount: Object.keys(tools).length,
+        toolNames: Object.keys(tools),
+      });
+
+      // Model-specific maxTokens handling - Gemini 2.5 models have issues with maxTokens
+      const modelName = this.modelName || getDefaultLiteLLMModel();
+      const isGemini25Model =
+        modelName.includes("gemini-2.5") || modelName.includes("gemini/2.5");
+      const maxTokens = isGemini25Model ? undefined : options.maxTokens;
+
+      if (isGemini25Model && options.maxTokens) {
+        logger.debug(
+          `LiteLLM: Skipping maxTokens for Gemini 2.5 model (known compatibility issue)`,
+          {
+            modelName,
+            requestedMaxTokens: options.maxTokens,
+          },
+        );
+      }
+
+      // Build complete stream options with proper typing - matching Vertex pattern
+      let streamOptions: Parameters<typeof streamText>[0] = {
+        model: model,
         messages: messages,
         temperature: options.temperature,
-        maxTokens: options.maxTokens, // No default limit - unlimited unless specified
-        tools: options.tools,
-        toolChoice: "auto",
+        ...(maxTokens && { maxTokens }), // Conditionally include maxTokens
+        ...(shouldUseTools &&
+          Object.keys(tools).length > 0 && {
+            tools,
+            toolChoice: "auto",
+            maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
+          }),
         abortSignal: timeoutController?.controller.signal,
-      });
+
+        onError: (event: { error: unknown }) => {
+          const error = event.error;
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          logger.error(`LiteLLM: Stream error`, {
+            provider: this.providerName,
+            modelName: this.modelName,
+            error: errorMessage,
+            chunkCount,
+          });
+        },
+
+        onFinish: (event: {
+          finishReason: string;
+          usage: Record<string, unknown>;
+          text?: string;
+        }) => {
+          logger.debug(`LiteLLM: Stream finished`, {
+            finishReason: event.finishReason,
+            totalChunks: chunkCount,
+          });
+        },
+
+        onChunk: () => {
+          chunkCount++;
+        },
+
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          logger.info("Tool execution completed", { toolResults, toolCalls });
+
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn("LiteLLMProvider] Failed to store tool executions", {
+              provider: this.providerName,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+        },
+      };
+
+      // Add analysisSchema support if provided
+      if (analysisSchema) {
+        try {
+          streamOptions = {
+            ...streamOptions,
+            experimental_output: Output.object({
+              schema: analysisSchema,
+            }),
+          };
+        } catch (error) {
+          logger.warn("Schema application failed, continuing without schema", {
+            error: String(error),
+          });
+        }
+      }
+
+      const result = await streamText(streamOptions);
 
       timeoutController?.cleanup();
 
-      // Transform stream to match StreamResult interface
-      const transformedStream = async function* () {
-        for await (const chunk of result.textStream) {
-          yield { content: chunk };
+      // Transform stream to content object stream using fullStream (handles both text and tool calls)
+      // Note: fullStream includes tool results, textStream only has text
+      const transformedStream = (async function* () {
+        // Try fullStream first (handles both text and tool calls), fallback to textStream
+        const streamToUse = result.fullStream || result.textStream;
+
+        for await (const chunk of streamToUse) {
+          // Handle different chunk types from fullStream
+          if (chunk && typeof chunk === "object") {
+            // Check for error chunks first (critical error handling)
+            if ("type" in chunk && chunk.type === "error") {
+              const errorChunk = chunk as {
+                type: "error";
+                error: Record<string, unknown>;
+              };
+              logger.error(`LiteLLM: Error chunk received:`, {
+                errorType: errorChunk.type,
+                errorDetails: errorChunk.error,
+              });
+              throw new Error(
+                `LiteLLM streaming error: ${
+                  (errorChunk.error as Record<string, unknown>)?.message ||
+                  "Unknown error"
+                }`,
+              );
+            }
+
+            if ("textDelta" in chunk) {
+              // Text delta from fullStream
+              const textDelta = (chunk as { textDelta: string }).textDelta;
+              if (textDelta) {
+                yield { content: textDelta };
+              }
+            } else if (chunk.type === "tool-call-streaming-start") {
+              // Tool call streaming start event - log for debugging
+              const toolCall = chunk as {
+                type: "tool-call-streaming-start";
+                toolCallId: string;
+                toolName: string;
+              };
+              logger.debug("LiteLLM: Tool call streaming start", {
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+              });
+            }
+          } else if (typeof chunk === "string") {
+            // Direct string chunk from textStream fallback
+            yield { content: chunk };
+          }
         }
-      };
+      })();
 
       // Create analytics promise that resolves after stream completion
       const analyticsPromise = streamAnalyticsCollector.createAnalytics(
@@ -209,7 +350,7 @@ export class LiteLLMProvider extends BaseProvider {
       );
 
       return {
-        stream: transformedStream(),
+        stream: transformedStream,
         provider: this.providerName,
         model: this.modelName,
         analytics: analyticsPromise,

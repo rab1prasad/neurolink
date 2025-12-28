@@ -1,8 +1,7 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import type { ZodType, ZodTypeDef } from "zod";
 import { streamText, type Schema, type LanguageModelV1 } from "ai";
-import type { AIProviderName } from "../types/index.js";
-import { AnthropicModels } from "../types/index.js";
+import { AIProviderName, AnthropicModels } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import { BaseProvider } from "../core/baseProvider.js";
 import { logger } from "../utils/logger.js";
@@ -89,10 +88,7 @@ export class AnthropicProviderV2 extends BaseProvider {
     _analysisSchema?: ZodType<unknown, ZodTypeDef, unknown> | Schema<unknown>,
   ): Promise<StreamResult> {
     // Note: StreamOptions validation handled differently than TextGenerationOptions
-
-    const apiKey = this.getApiKey();
-    const anthropicClient = createAnthropic({ apiKey });
-    const model = anthropicClient(this.modelName);
+    const model = await this.getAISDKModelWithMiddleware(options);
 
     const timeout = this.getTimeout(options);
     const timeoutController = createTimeoutController(
@@ -111,6 +107,22 @@ export class AnthropicProviderV2 extends BaseProvider {
         tools: options.tools,
         toolChoice: "auto",
         abortSignal: timeoutController?.controller.signal,
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn(
+              "[AnthropicBaseProvider] Failed to store tool executions",
+              {
+                provider: this.providerName,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+          });
+        },
       });
 
       timeoutController?.cleanup();

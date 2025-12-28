@@ -5,12 +5,16 @@
 
 import type {
   DiscoveredMcp,
-  ExecutionContext,
+  ToolResult,
+  MCPServerInfo,
+  MCPServerCategory,
+} from "../types/mcpTypes.js";
+import type {
+  ToolImplementation,
   ToolInfo,
-} from "./contracts/mcpContract.js";
-import type { ToolResult } from "./factory.js";
+  ExecutionContext,
+} from "../types/tools.js";
 import type { UnknownRecord } from "../types/common.js";
-import type { MCPServerInfo, MCPServerCategory } from "../types/mcpTypes.js";
 import { MCPRegistry } from "./registry.js";
 import { registryLogger } from "../utils/logger.js";
 import { randomUUID } from "crypto";
@@ -18,34 +22,8 @@ import { shouldDisableBuiltinTools } from "../utils/toolUtils.js";
 import { directAgentTools } from "../agent/directTools.js";
 import { detectCategory, createMCPServerInfo } from "../utils/mcpDefaults.js";
 import { FlexibleToolValidator } from "./flexibleToolValidator.js";
-
-interface ToolImplementation {
-  execute: (
-    params: unknown,
-    context?: ExecutionContext,
-  ) => Promise<unknown> | unknown;
-  description?: string;
-  inputSchema?: unknown;
-  outputSchema?: unknown;
-  category?: string;
-  permissions?: string[];
-}
-
-// Use the compatible ToolResult from factory.ts
-export type ToolExecutionResult = ToolResult;
-
-/**
- * Tool execution options
- */
-export interface ToolExecutionOptions {
-  timeout?: number;
-  retries?: number;
-  context?: ExecutionContext;
-  preferredSource?: string;
-  fallbackEnabled?: boolean;
-  validateBeforeExecution?: boolean;
-  timeoutMs?: number;
-}
+import type { HITLManager } from "../hitl/hitlManager.js";
+import { HITLUserRejectedError, HITLTimeoutError } from "../hitl/hitlErrors.js";
 
 export class MCPToolRegistry extends MCPRegistry {
   private tools: Map<string, ToolInfo> = new Map();
@@ -55,15 +33,33 @@ export class MCPToolRegistry extends MCPRegistry {
     { count: number; totalTime: number }
   > = new Map();
   private builtInServerInfos: MCPServerInfo[] = []; // DIRECT storage for MCPServerInfo
+  private hitlManager?: HITLManager; // Optional HITL manager for safety mechanisms
 
   constructor() {
     super();
-    // 🔧 CONDITIONAL: Only auto-register direct tools if not disabled via configuration
     if (!shouldDisableBuiltinTools()) {
       this.registerDirectTools();
-    } else {
-      registryLogger.debug("Built-in direct tools disabled via configuration");
     }
+  }
+
+  /**
+   * Set HITL manager for human-in-the-loop safety mechanisms
+   * @param hitlManager - HITL manager instance (optional, can be undefined to disable)
+   */
+  setHITLManager(hitlManager?: HITLManager): void {
+    this.hitlManager = hitlManager;
+    if (hitlManager && hitlManager.isEnabled()) {
+      registryLogger.info("HITL safety mechanisms enabled for tool execution");
+    } else {
+      registryLogger.debug("HITL safety mechanisms disabled or not configured");
+    }
+  }
+
+  /**
+   * Get current HITL manager
+   */
+  getHITLManager(): HITLManager | undefined {
+    return this.hitlManager;
   }
 
   /**
@@ -73,6 +69,14 @@ export class MCPToolRegistry extends MCPRegistry {
     registryLogger.debug("Auto-registering direct tools...");
 
     for (const [toolName, toolDef] of Object.entries(directAgentTools)) {
+      // Skip undefined tools
+      if (!toolDef) {
+        registryLogger.warn(
+          `Skipping undefined tool during registration: ${toolName}`,
+        );
+        continue;
+      }
+
       const toolId = `direct.${toolName}`;
       const toolInfo: ToolInfo = {
         name: toolName,
@@ -171,7 +175,6 @@ export class MCPToolRegistry extends MCPRegistry {
       _finalContext = serverConfigOrContext as ExecutionContext | undefined;
     }
     const serverId = serverInfo.id;
-    registryLogger.info(`Registering MCPServerInfo directly: ${serverId}`);
 
     // Use MCPServerInfo.tools array directly - ZERO conversions!
     const toolsObject: Record<string, ToolImplementation> = {};
@@ -209,11 +212,6 @@ export class MCPToolRegistry extends MCPRegistry {
 
     // Use MCPServerInfo.tools array directly - ZERO conversions!
     const tools = serverInfo.tools;
-    registryLogger.debug(
-      `Registering ${tools.length} tools for server ${serverId}:`,
-      tools.map((t) => t.name),
-    );
-
     for (const tool of tools) {
       // For custom tools, use just the tool name to avoid redundant serverId.toolName format
       // For other tools, use fully-qualified serverId.toolName to avoid collisions
@@ -250,10 +248,7 @@ export class MCPToolRegistry extends MCPRegistry {
         }),
       });
 
-      registryLogger.debug(
-        `Registered tool '${tool.name}' with execute function:`,
-        typeof tool.execute,
-      );
+      // Tool registered successfully
     }
 
     // Store MCPServerInfo directly - NO recreation needed!
@@ -309,10 +304,20 @@ export class MCPToolRegistry extends MCPRegistry {
     const startTime = Date.now();
 
     try {
-      registryLogger.info(`Executing tool: ${toolName}`);
+      registryLogger.info(
+        `🔧 [TOOL_EXECUTION] Starting execution: ${toolName}`,
+      );
+      registryLogger.info(
+        `🔧 [TOOL_EXECUTION] Starting execution: ${toolName}`,
+        { args, context },
+      );
 
       // Try to find the tool by fully-qualified name first
       let tool = this.tools.get(toolName);
+      registryLogger.info(
+        `🔍 [TOOL_LOOKUP] Direct lookup result for '${toolName}':`,
+        !!tool,
+      );
 
       // If not found, search for tool by name across all entries (for backward compatibility)
       let toolId = toolName;
@@ -353,9 +358,82 @@ export class MCPToolRegistry extends MCPRegistry {
         );
       }
 
-      // Execute the actual tool
-      registryLogger.debug(`Executing tool '${toolName}' with args:`, args);
-      const toolResult = await toolImpl.execute(args, execContext);
+      // HITL Safety Check: Request confirmation if required
+      let finalArgs = args;
+      if (this.hitlManager && this.hitlManager.isEnabled()) {
+        const requiresConfirmation = this.hitlManager.requiresConfirmation(
+          toolName,
+          args,
+        );
+
+        if (requiresConfirmation) {
+          registryLogger.info(`Tool '${toolName}' requires HITL confirmation`);
+
+          try {
+            const confirmationResult =
+              await this.hitlManager.requestConfirmation(toolName, args, {
+                serverId: tool.serverId,
+                sessionId: execContext.sessionId,
+                userId: execContext.userId,
+              });
+
+            if (!confirmationResult.approved) {
+              // User rejected the tool execution
+              throw new HITLUserRejectedError(
+                `Tool execution rejected by user: ${confirmationResult.reason || "No reason provided"}`,
+                toolName,
+                confirmationResult.reason,
+              );
+            }
+
+            // User approved - use modified arguments if provided
+            if (confirmationResult.modifiedArguments !== undefined) {
+              finalArgs = confirmationResult.modifiedArguments;
+              registryLogger.info(
+                `Tool '${toolName}' arguments modified by user`,
+              );
+            }
+
+            registryLogger.info(
+              `Tool '${toolName}' approved for execution (response time: ${confirmationResult.responseTime}ms)`,
+            );
+          } catch (error) {
+            if (error instanceof HITLTimeoutError) {
+              // Timeout occurred - user didn't respond in time
+              registryLogger.warn(
+                `Tool '${toolName}' execution timed out waiting for user confirmation`,
+              );
+              throw error;
+            } else if (error instanceof HITLUserRejectedError) {
+              // User explicitly rejected
+              registryLogger.info(
+                `Tool '${toolName}' execution rejected by user`,
+              );
+              throw error;
+            } else {
+              // Other HITL error (configuration, system error, etc.)
+              registryLogger.error(
+                `HITL confirmation failed for tool '${toolName}':`,
+                error,
+              );
+              throw new Error(
+                `HITL confirmation failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+        } else {
+          registryLogger.debug(
+            `Tool '${toolName}' does not require HITL confirmation`,
+          );
+        }
+      }
+
+      // Execute the actual tool (with potentially modified arguments)
+      registryLogger.debug(
+        `Executing tool '${toolName}' with args:`,
+        finalArgs,
+      );
+      const toolResult = await toolImpl.execute(finalArgs, execContext);
 
       // Properly wrap raw results in ToolResult format
       let result: ToolResult;
@@ -795,4 +873,4 @@ export const toolRegistry = new MCPToolRegistry();
 export const defaultToolRegistry = toolRegistry;
 
 // Export ToolInfo for other modules
-export type { ToolInfo } from "./contracts/mcpContract.js";
+export type { ToolInfo } from "../types/tools.js";

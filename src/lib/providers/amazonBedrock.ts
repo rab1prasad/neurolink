@@ -2,6 +2,7 @@ import {
   BedrockRuntimeClient,
   ConverseCommand,
   ConverseStreamCommand,
+  ImageFormat,
 } from "@aws-sdk/client-bedrock-runtime";
 import type {
   ConverseCommandInput,
@@ -17,51 +18,44 @@ import {
   BedrockClient,
   ListFoundationModelsCommand,
 } from "@aws-sdk/client-bedrock";
-
 import { BaseProvider } from "../core/baseProvider.js";
 import type {
-  AIProviderName,
   EnhancedGenerateResult,
   TextGenerationOptions,
 } from "../types/index.js";
+import { AIProviderName } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import type { ToolDefinition, ToolArgs } from "../types/tools.js";
 import type { JsonValue } from "../types/common.js";
+import type {
+  BedrockContentBlock,
+  BedrockMessage,
+} from "../types/providers.js";
 import type { NeuroLink } from "../neurolink.js";
 import { logger } from "../utils/logger.js";
 import type { DocumentType } from "@smithy/types";
-import { zodToJsonSchema } from "zod-to-json-schema";
-import type { ZodType } from "zod";
+import { convertZodToJsonSchema } from "../utils/schemaConversion.js";
+import type { ZodUnknownSchema } from "../types/typeAliases.js";
+import { buildMultimodalMessagesArray } from "../utils/messageBuilder.js";
+import { buildMultimodalOptions } from "../utils/multimodalOptionsBuilder.js";
+import type {
+  MultimodalChatMessage,
+  MessageContent,
+} from "../types/conversation.js";
+import { DEFAULT_MAX_STEPS } from "../core/constants.js";
+import { createAnalytics } from "../core/analytics.js";
+import path from "path";
 
-interface BedrockToolUse {
-  toolUseId: string;
-  name: string;
-  input: Record<string, unknown>;
-}
-
-interface BedrockToolResult {
-  toolUseId: string;
-  content: Array<{ text: string }>;
-  status: string;
-}
-
-interface BedrockContentBlock {
-  text?: string;
-  toolUse?: BedrockToolUse;
-  toolResult?: BedrockToolResult;
-}
-
-interface BedrockMessage {
-  role: "user" | "assistant";
-  content: BedrockContentBlock[];
-}
+// Bedrock-specific types now imported from ../types/providerSpecific.js
 
 export class AmazonBedrockProvider extends BaseProvider {
   private bedrockClient: BedrockRuntimeClient;
   private conversationHistory: BedrockMessage[] = [];
+  private region: string;
 
-  constructor(modelName?: string, neurolink?: NeuroLink) {
+  constructor(modelName?: string, neurolink?: NeuroLink, region?: string) {
     super(modelName, "bedrock" as AIProviderName, neurolink);
+    this.region = region || process.env.AWS_REGION || "us-east-1";
 
     logger.debug(
       "[AmazonBedrockProvider] Starting constructor with extensive logging for debugging",
@@ -80,7 +74,7 @@ export class AmazonBedrockProvider extends BaseProvider {
       );
 
       this.bedrockClient = new BedrockRuntimeClient({
-        region: process.env.AWS_REGION || "us-east-1",
+        region: this.region,
         // Clean configuration - AWS SDK will handle credentials via:
         // 1. IAM roles (preferred in production)
         // 2. Environment variables
@@ -89,7 +83,7 @@ export class AmazonBedrockProvider extends BaseProvider {
       });
 
       logger.debug(
-        `[AmazonBedrockProvider] Successfully created BedrockRuntimeClient with model: ${this.modelName}, region: ${process.env.AWS_REGION || "us-east-1"}`,
+        `[AmazonBedrockProvider] Successfully created BedrockRuntimeClient with model: ${this.modelName}, region: ${this.region}`,
       );
 
       // Immediate health check to catch credential issues early
@@ -109,7 +103,7 @@ export class AmazonBedrockProvider extends BaseProvider {
    */
   private async performInitialHealthCheck(): Promise<void> {
     const bedrockClient = new BedrockClient({
-      region: process.env.AWS_REGION || "us-east-1",
+      region: this.region,
     });
 
     try {
@@ -182,15 +176,66 @@ export class AmazonBedrockProvider extends BaseProvider {
     // Clear conversation history for new generation
     this.conversationHistory = [];
 
-    // Add user message to conversation
-    const userMessage: BedrockMessage = {
-      role: "user",
-      content: [{ text: options.prompt }],
-    };
-    this.conversationHistory.push(userMessage);
+    // Check for multimodal input (images, PDFs, CSVs, files)
+    // Cast to any to access multimodal properties (runtime check is safe)
+    const input = options.input as unknown as StreamOptions["input"];
+    const hasMultimodalInput = !!(
+      input?.images?.length ||
+      input?.content?.length ||
+      input?.files?.length ||
+      input?.csvFiles?.length ||
+      input?.pdfFiles?.length
+    );
+
+    if (hasMultimodalInput) {
+      logger.debug(
+        `[AmazonBedrockProvider] Detected multimodal input in generate(), using multimodal message builder`,
+        {
+          hasImages: !!input?.images?.length,
+          imageCount: input?.images?.length || 0,
+          hasContent: !!input?.content?.length,
+          contentCount: input?.content?.length || 0,
+          hasFiles: !!input?.files?.length,
+          fileCount: input?.files?.length || 0,
+          hasCSVFiles: !!input?.csvFiles?.length,
+          csvFileCount: input?.csvFiles?.length || 0,
+          hasPDFFiles: !!input?.pdfFiles?.length,
+          pdfFileCount: input?.pdfFiles?.length || 0,
+        },
+      );
+
+      // Cast options to StreamOptions for multimodal processing
+      const streamOptions = options as unknown as StreamOptions;
+      const multimodalOptions = buildMultimodalOptions(
+        streamOptions,
+        this.providerName,
+        this.modelName,
+      );
+
+      const multimodalMessages = await buildMultimodalMessagesArray(
+        multimodalOptions,
+        this.providerName,
+        this.modelName,
+      );
+
+      // Convert to Bedrock format
+      this.conversationHistory =
+        this.convertToBedrockMessages(multimodalMessages);
+    } else {
+      logger.debug(
+        `[AmazonBedrockProvider] Text-only input in generate(), using simple message builder`,
+      );
+
+      // Add user message to conversation - simple text-only case
+      const userMessage: BedrockMessage = {
+        role: "user",
+        content: [{ text: options.prompt }],
+      };
+      this.conversationHistory.push(userMessage);
+    }
 
     logger.debug(
-      `[AmazonBedrockProvider] Starting conversation with prompt: ${options.prompt}`,
+      `[AmazonBedrockProvider] Starting conversation with ${this.conversationHistory.length} message(s)`,
     );
 
     // Start conversation loop and return enhanced result
@@ -551,6 +596,16 @@ export class AmazonBedrockProvider extends BaseProvider {
             text: item.text,
           } as ContentBlock;
         }
+        if (item.image) {
+          return {
+            image: item.image,
+          } as ContentBlock;
+        }
+        if (item.document) {
+          return {
+            document: item.document,
+          } as ContentBlock;
+        }
         if (item.toolUse) {
           return {
             toolUse: {
@@ -710,10 +765,9 @@ export class AmazonBedrockProvider extends BaseProvider {
           // Check if it's a Zod schema
           if ("_def" in tool.parameters) {
             // It's a Zod schema, convert to JSON schema
-            schema = zodToJsonSchema(tool.parameters as ZodType) as Record<
-              string,
-              unknown
-            >;
+            schema = convertZodToJsonSchema(
+              tool.parameters as ZodUnknownSchema,
+            ) as Record<string, unknown>;
           } else {
             // It's already a plain object schema
             schema = tool.parameters as Record<string, unknown>;
@@ -756,6 +810,109 @@ export class AmazonBedrockProvider extends BaseProvider {
     return { tools: bedrockTools };
   }
 
+  // Convert multimodal messages to Bedrock format
+  private convertToBedrockMessages(
+    messages: MultimodalChatMessage[],
+  ): BedrockMessage[] {
+    return messages.map((msg) => {
+      const bedrockMessage: BedrockMessage = {
+        role: msg.role === "system" ? "user" : msg.role,
+        content: [],
+      };
+
+      if (typeof msg.content === "string") {
+        bedrockMessage.content.push({ text: msg.content });
+      } else {
+        msg.content.forEach((contentItem: MessageContent) => {
+          if (contentItem.type === "text" && contentItem.text) {
+            bedrockMessage.content.push({ text: contentItem.text });
+          } else if (contentItem.type === "image" && contentItem.image) {
+            const imageData =
+              typeof contentItem.image === "string"
+                ? Buffer.from(
+                    contentItem.image.replace(/^data:image\/\w+;base64,/, ""),
+                    "base64",
+                  )
+                : contentItem.image;
+
+            let format = contentItem.mimeType?.split("/")[1] || "png";
+            if (format === "jpg") {
+              format = "jpeg";
+            }
+
+            bedrockMessage.content.push({
+              image: {
+                format:
+                  format === "jpeg"
+                    ? ImageFormat.JPEG
+                    : format === "png"
+                      ? ImageFormat.PNG
+                      : format === "gif"
+                        ? ImageFormat.GIF
+                        : ImageFormat.WEBP,
+                source: {
+                  bytes: imageData,
+                },
+              },
+            });
+          } else if (
+            contentItem.type === "document" ||
+            contentItem.type === "pdf" ||
+            (contentItem.type === "file" &&
+              contentItem.mimeType?.toLowerCase().startsWith("application/pdf"))
+          ) {
+            let docData: Buffer;
+            if (typeof contentItem.data === "string") {
+              const pdfString = contentItem.data.replace(
+                /^data:application\/pdf;base64,/i,
+                "",
+              );
+              docData = Buffer.from(pdfString, "base64");
+            } else {
+              docData = contentItem.data as Buffer;
+            }
+
+            // Extract basename and sanitize for Bedrock's filename requirements
+            // Bedrock only allows: alphanumeric, whitespace, hyphens, parentheses, brackets
+            // NOTE: Periods (.) are NOT allowed, so we remove the extension
+            let filename =
+              typeof contentItem.name === "string" && contentItem.name
+                ? path.basename(contentItem.name)
+                : "document-pdf";
+
+            // Remove file extension
+            filename = filename.replace(/\.[^.]+$/, "");
+
+            // Replace all disallowed characters with hyphens
+            // Bedrock constraint: only alphanumeric, whitespace, hyphens, parentheses, brackets allowed
+            filename = filename.replace(/[^a-zA-Z0-9\s\-()[\]]/g, "-");
+
+            // Clean up: remove multiple consecutive hyphens and trim
+            filename = filename
+              .replace(/-+/g, "-")
+              .trim()
+              .replace(/^-+|-+$/g, "");
+
+            // Fallback if filename becomes empty after sanitization
+            filename = filename || "document";
+
+            bedrockMessage.content.push({
+              document: {
+                format: "pdf" as const,
+                name: filename,
+                source: {
+                  bytes: docData,
+                },
+              },
+            });
+          }
+        });
+      }
+
+      return bedrockMessage;
+    });
+  }
+
   // Bedrock-MCP-Connector compatibility
   getBedrockClient(): BedrockRuntimeClient {
     return this.bedrockClient;
@@ -771,19 +928,65 @@ export class AmazonBedrockProvider extends BaseProvider {
       logger.debug(
         "🟢 [TRACE] executeStream TRY block - about to call streamingConversationLoop",
       );
-      // CRITICAL FIX: Initialize conversation history like generate() does
       // Clear conversation history for new streaming session
       this.conversationHistory = [];
 
-      // Add user message to conversation - exactly like generate() does
-      const userMessage: BedrockMessage = {
-        role: "user",
-        content: [{ text: options.input.text }],
-      };
-      this.conversationHistory.push(userMessage);
+      // Check for multimodal input (images, PDFs, CSVs, files)
+      const hasMultimodalInput = !!(
+        options.input?.images?.length ||
+        options.input?.content?.length ||
+        options.input?.files?.length ||
+        options.input?.csvFiles?.length ||
+        options.input?.pdfFiles?.length
+      );
+
+      if (hasMultimodalInput) {
+        logger.debug(
+          `[AmazonBedrockProvider] Detected multimodal input, using multimodal message builder`,
+          {
+            hasImages: !!options.input?.images?.length,
+            imageCount: options.input?.images?.length || 0,
+            hasContent: !!options.input?.content?.length,
+            contentCount: options.input?.content?.length || 0,
+            hasFiles: !!options.input?.files?.length,
+            fileCount: options.input?.files?.length || 0,
+            hasCSVFiles: !!options.input?.csvFiles?.length,
+            csvFileCount: options.input?.csvFiles?.length || 0,
+            hasPDFFiles: !!options.input?.pdfFiles?.length,
+            pdfFileCount: options.input?.pdfFiles?.length || 0,
+          },
+        );
+
+        const multimodalOptions = buildMultimodalOptions(
+          options,
+          this.providerName,
+          this.modelName,
+        );
+
+        const multimodalMessages = await buildMultimodalMessagesArray(
+          multimodalOptions,
+          this.providerName,
+          this.modelName,
+        );
+
+        // Convert to Bedrock format
+        this.conversationHistory =
+          this.convertToBedrockMessages(multimodalMessages);
+      } else {
+        logger.debug(
+          `[AmazonBedrockProvider] Text-only input, using simple message builder`,
+        );
+
+        // Add user message to conversation - simple text-only case
+        const userMessage: BedrockMessage = {
+          role: "user",
+          content: [{ text: options.input.text }],
+        };
+        this.conversationHistory.push(userMessage);
+      }
 
       logger.debug(
-        `[AmazonBedrockProvider] Starting streaming conversation with prompt: ${options.input.text}`,
+        `[AmazonBedrockProvider] Starting streaming conversation with ${this.conversationHistory.length} message(s)`,
       );
 
       // Call the actual streaming implementation that already exists
@@ -889,7 +1092,8 @@ export class AmazonBedrockProvider extends BaseProvider {
     options: StreamOptions,
   ): Promise<StreamResult> {
     logger.debug("🟦 [TRACE] streamingConversationLoop ENTRY");
-    const maxIterations = 10;
+    const startTime = Date.now();
+    const maxIterations = options.maxSteps || DEFAULT_MAX_STEPS;
     let iteration = 0;
 
     // The REAL issue: ReadableStream errors don't bubble up to the caller
@@ -943,6 +1147,7 @@ export class AmazonBedrockProvider extends BaseProvider {
                 stopReason,
                 assistantMessage,
                 controller,
+                options,
               );
               if (!shouldContinue) {
                 break;
@@ -963,11 +1168,31 @@ export class AmazonBedrockProvider extends BaseProvider {
         },
       });
 
+      // Create analytics promise (without token tracking for now due to AWS SDK limitations)
+      const analyticsPromise = Promise.resolve(
+        createAnalytics(
+          this.providerName,
+          this.modelName || this.getDefaultModel(),
+          { usage: { input: 0, output: 0, total: 0 } },
+          Date.now() - startTime,
+          {
+            requestId: `bedrock-stream-${Date.now()}`,
+            streamingMode: true,
+            note: "Token usage not available from AWS SDK streaming responses",
+          },
+        ),
+      );
+
       return {
         stream: this.convertToAsyncIterable(stream),
         usage: { total: 0, input: 0, output: 0 },
         model: this.modelName || this.getDefaultModel(),
         provider: this.getProviderName(),
+        analytics: analyticsPromise,
+        metadata: {
+          startTime,
+          streamId: `bedrock-${Date.now()}`,
+        },
       };
     } catch (error: unknown) {
       logger.debug(
@@ -1176,6 +1401,7 @@ export class AmazonBedrockProvider extends BaseProvider {
     stopReason: string,
     assistantMessage: BedrockMessage,
     controller: ReadableStreamDefaultController,
+    options: StreamOptions,
   ): Promise<boolean> {
     if (stopReason === "end_turn" || stopReason === "stop_sequence") {
       // Conversation completed
@@ -1186,7 +1412,7 @@ export class AmazonBedrockProvider extends BaseProvider {
         `🛠️ [AmazonBedrockProvider] Tool use detected in streaming - executing tools`,
       );
 
-      await this.executeStreamTools(assistantMessage.content);
+      await this.executeStreamTools(assistantMessage.content, options);
       return true; // Continue conversation loop
     } else if (stopReason === "max_tokens") {
       // Handle max tokens by continuing conversation
@@ -1205,10 +1431,25 @@ export class AmazonBedrockProvider extends BaseProvider {
 
   private async executeStreamTools(
     messageContent: BedrockContentBlock[],
+    options: StreamOptions,
   ): Promise<void> {
     // Execute all tool uses in the message - ensure 1:1 mapping like Bedrock-MCP-Connector
     const toolResults = [];
     let toolUseCount = 0;
+
+    // Track tool calls and results for storage (similar to Vertex onStepFinish)
+    const toolCalls: Array<{
+      type: string;
+      toolCallId: string;
+      toolName: string;
+      args: unknown;
+    }> = [];
+    const toolResultsForStorage: Array<{
+      type: string;
+      toolCallId: string;
+      toolName: string;
+      result: unknown;
+    }> = [];
 
     // Count toolUse blocks first to ensure 1:1 mapping
     for (const contentItem of messageContent) {
@@ -1227,6 +1468,14 @@ export class AmazonBedrockProvider extends BaseProvider {
           `🔧 [AmazonBedrockProvider] Executing tool: ${contentItem.toolUse.name}`,
         );
 
+        // Track tool call
+        toolCalls.push({
+          type: "tool-call",
+          toolCallId: contentItem.toolUse.toolUseId,
+          toolName: contentItem.toolUse.name,
+          args: contentItem.toolUse.input || {},
+        });
+
         try {
           const toolResult = await this.executeSingleTool(
             contentItem.toolUse.name,
@@ -1237,6 +1486,14 @@ export class AmazonBedrockProvider extends BaseProvider {
           logger.debug(
             `✅ [AmazonBedrockProvider] Tool execution successful: ${contentItem.toolUse.name}`,
           );
+
+          // Track tool result for storage
+          toolResultsForStorage.push({
+            type: "tool-result",
+            toolCallId: contentItem.toolUse.toolUseId,
+            toolName: contentItem.toolUse.name,
+            result: toolResult,
+          });
 
           // Ensure exact structure matching Bedrock-MCP-Connector
           toolResults.push({
@@ -1254,6 +1511,15 @@ export class AmazonBedrockProvider extends BaseProvider {
 
           const errorMessage =
             error instanceof Error ? error.message : String(error);
+
+          // Track failed tool result
+          toolResultsForStorage.push({
+            type: "tool-result",
+            toolCallId: contentItem.toolUse.toolUseId,
+            toolName: contentItem.toolUse.name,
+            result: { error: errorMessage },
+          });
+
           toolResults.push({
             toolResult: {
               toolUseId: contentItem.toolUse.toolUseId,
@@ -1294,6 +1560,19 @@ export class AmazonBedrockProvider extends BaseProvider {
       logger.debug(
         `📤 [AmazonBedrockProvider] Added ${toolResults.length} tool results to conversation (1:1 mapping validated)`,
       );
+
+      // Store tool execution for analytics and debugging (similar to Vertex onStepFinish)
+      this.handleToolExecutionStorage(
+        toolCalls,
+        toolResultsForStorage,
+        options,
+        new Date(),
+      ).catch((error: unknown) => {
+        logger.warn("[AmazonBedrockProvider] Failed to store tool executions", {
+          provider: this.providerName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
   }
 

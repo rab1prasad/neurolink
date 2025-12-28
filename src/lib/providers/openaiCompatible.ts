@@ -1,15 +1,17 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, type Schema, type LanguageModelV1 } from "ai";
 import type { ZodUnknownSchema } from "../types/typeAliases.js";
-import type { AIProviderName } from "../types/index.js";
+import { AIProviderName } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import type { UnknownRecord } from "../types/common.js";
+import type { ModelsResponse } from "../types/providers.js";
 import type { NeuroLink } from "../neurolink.js";
 import { BaseProvider } from "../core/baseProvider.js";
 import { logger } from "../utils/logger.js";
 import { createTimeoutController, TimeoutError } from "../utils/timeout.js";
 import { streamAnalyticsCollector } from "../core/streamAnalytics.js";
 import { createProxyFetch } from "../proxy/proxyFetch.js";
+import { DEFAULT_MAX_STEPS } from "../core/constants.js";
 
 // Constants
 const FALLBACK_OPENAI_COMPATIBLE_MODEL = "gpt-3.5-turbo";
@@ -49,17 +51,7 @@ const getDefaultOpenAICompatibleModel = (): string | undefined => {
   return process.env.OPENAI_COMPATIBLE_MODEL || undefined;
 };
 
-/**
- * Interface for OpenAI-compatible models endpoint response
- */
-interface ModelsResponse {
-  data: Array<{
-    id: string;
-    object: string;
-    created?: number;
-    owned_by?: string;
-  }>;
-}
+// ModelsResponse type now imported from ../types/providerSpecific.js
 
 /**
  * OpenAI Compatible Provider - BaseProvider Implementation
@@ -236,16 +228,40 @@ export class OpenAICompatibleProvider extends BaseProvider {
     );
 
     try {
-      const model = await this.getAISDKModel();
+      // Build message array from options with multimodal support
+      // Using protected helper from BaseProvider to eliminate code duplication
+      const messages = await this.buildMessagesForStream(options);
+
+      const model = await this.getAISDKModelWithMiddleware(options); // This is where network connection happens!
       const result = streamText({
         model,
-        prompt: options.input.text,
-        system: options.systemPrompt,
-        temperature: options.temperature,
-        maxTokens: options.maxTokens, // No default limit - unlimited unless specified
+        messages: messages,
+        ...(options.maxTokens !== null && options.maxTokens !== undefined
+          ? { maxTokens: options.maxTokens }
+          : {}),
+        ...(options.temperature !== null && options.temperature !== undefined
+          ? { temperature: options.temperature }
+          : {}),
+        maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
         tools: options.tools,
         toolChoice: "auto",
         abortSignal: timeoutController?.controller.signal,
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn(
+              "[OpenAiCompatibleProvider] Failed to store tool executions",
+              {
+                provider: this.providerName,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+          });
+        },
       });
 
       timeoutController?.cleanup();

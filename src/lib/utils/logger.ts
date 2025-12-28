@@ -14,14 +14,7 @@
  * - Tabular data display
  */
 
-/**
- * Represents the available logging severity levels.
- * - debug: Detailed information for debugging purposes
- * - info: General information about system operation
- * - warn: Potential issues that don't prevent operation
- * - error: Critical issues that may cause failures
- */
-export type LogLevel = "debug" | "info" | "warn" | "error";
+import type { LogEntry, LogLevel } from "../types/utilities.js";
 
 // Pre-computed uppercase log levels for performance optimization
 const UPPERCASE_LOG_LEVELS: Record<LogLevel, string> = {
@@ -31,26 +24,14 @@ const UPPERCASE_LOG_LEVELS: Record<LogLevel, string> = {
   error: "ERROR",
 } as const;
 
-/**
- * Represents a single log entry in the logging system.
- * Each entry contains metadata about the log event along with the actual message.
- */
-interface LogEntry {
-  /** The severity level of the log entry */
-  level: LogLevel;
-  /** The text message to be logged */
-  message: string;
-  /** When the log entry was created */
-  timestamp: Date;
-  /** Optional additional data associated with the log entry (objects, arrays, etc.) */
-  data?: unknown;
-}
-
 class NeuroLinkLogger {
   private logLevel: LogLevel = "info";
   private logs: LogEntry[] = [];
   private maxLogs = 1000;
   private isDebugMode: boolean;
+  private eventEmitter?: {
+    emit: (event: string, ...args: unknown[]) => boolean;
+  };
 
   constructor() {
     // Cache debug mode check to avoid repeated array searches
@@ -64,6 +45,26 @@ class NeuroLinkLogger {
     if (envLevel && ["debug", "info", "warn", "error"].includes(envLevel)) {
       this.logLevel = envLevel;
     }
+  }
+
+  /**
+   * Sets the event emitter that will receive log events.
+   * When set, all log operations will emit a "log-event" event.
+   *
+   * @param emitter - The event emitter instance
+   */
+  setEventEmitter(emitter: {
+    emit: (event: string, ...args: unknown[]) => boolean;
+  }): void {
+    this.eventEmitter = emitter;
+  }
+
+  /**
+   * Clears the event emitter reference.
+   * Should be called when a NeuroLink instance is disposed to prevent memory leaks.
+   */
+  clearEventEmitter(): void {
+    this.eventEmitter = undefined;
   }
 
   /**
@@ -147,6 +148,7 @@ class NeuroLinkLogger {
    * 2. Storing entries in the log history
    * 3. Managing log rotation to prevent memory issues
    * 4. Outputting formatted logs to the console
+   * 5. Emitting log events if an event emitter is configured
    *
    * This is the central method called by all specific logging methods (debug, info, etc.)
    *
@@ -165,6 +167,20 @@ class NeuroLinkLogger {
       timestamp: new Date(),
       data,
     };
+
+    // Emit log event if emitter is configured
+    if (this.eventEmitter) {
+      try {
+        this.eventEmitter.emit("log-event", {
+          level,
+          message,
+          timestamp: new Date().getTime(),
+          data,
+        });
+      } catch {
+        // Silently ignore emitter errors to avoid disrupting logging
+      }
+    }
 
     // Store log entry
     this.logs.push(entry);
@@ -337,6 +353,7 @@ function processLoggerArgs(
  * - Unconditional logging (always, table)
  * - Log level control and configuration
  * - Log history management
+ * - Event emission for all log operations (when emitter is configured)
  */
 export const logger = {
   debug: (...args: unknown[]) => {
@@ -377,6 +394,10 @@ export const logger = {
   setLogLevel: (level: LogLevel) => neuroLinkLogger.setLogLevel(level),
   getLogs: (level?: LogLevel) => neuroLinkLogger.getLogs(level),
   clearLogs: () => neuroLinkLogger.clearLogs(),
+  setEventEmitter: (emitter: {
+    emit: (event: string, ...args: unknown[]) => boolean;
+  }) => neuroLinkLogger.setEventEmitter(emitter),
+  clearEventEmitter: () => neuroLinkLogger.clearEventEmitter(),
 };
 
 /**
@@ -422,6 +443,3 @@ export const LogLevels = {
   warn: "warn" as const,
   error: "error" as const,
 } as const;
-
-// Export types
-export type { LogEntry };

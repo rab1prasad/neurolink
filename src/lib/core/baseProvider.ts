@@ -1,48 +1,39 @@
-import { z } from "zod";
 import type {
   ZodUnknownSchema,
   ValidationSchema,
   StandardRecord,
 } from "../types/typeAliases.js";
-import type { Tool, LanguageModelV1 } from "ai";
+import type { Tool, LanguageModelV1, CoreMessage } from "ai";
+import { generateText } from "ai";
 import type {
   AIProvider,
   TextGenerationOptions,
   TextGenerationResult,
   EnhancedGenerateResult,
   AnalyticsData,
-  AIProviderName,
-  ExtendedTool,
-  AISDKGenerateResult,
 } from "../types/index.js";
+import type { Context } from "../types/common.js";
+import { AIProviderName } from "../constants/enums.js";
 import type { EvaluationData } from "../index.js";
 import { MiddlewareFactory } from "../middleware/factory.js";
 import type { MiddlewareFactoryOptions } from "../types/middlewareTypes.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
-import type { JsonValue, JsonObject, UnknownRecord } from "../types/common.js";
-import type { ToolResult, ToolArgs } from "../types/tools.js";
+import type { JsonValue, UnknownRecord } from "../types/common.js";
 import { logger } from "../utils/logger.js";
-import { DEFAULT_MAX_STEPS, STEP_LIMITS } from "../core/constants.js";
 import { directAgentTools } from "../agent/directTools.js";
-import { getSafeMaxTokens } from "../utils/tokenLimits.js";
 import { createTimeoutController, TimeoutError } from "../utils/timeout.js";
 import { shouldDisableBuiltinTools } from "../utils/toolUtils.js";
-import { buildMessagesArray } from "../utils/messageBuilder.js";
 import type { NeuroLink } from "../neurolink.js";
 import { getKeysAsString, getKeyCount } from "../utils/transformationUtils.js";
-import {
-  validateStreamOptions as validateStreamOpts,
-  validateTextGenerationOptions,
-  ValidationError,
-  createValidationSummary,
-} from "../utils/parameterValidation.js";
-import {
-  recordProviderPerformanceFromMetrics,
-  getPerformanceOptimizedProvider,
-} from "./evaluationProviders.js";
-import { modelConfig } from "./modelConfiguration.js";
 
-// Provider types moved to ../types/providers.js
+// Import modules for composition
+import { MessageBuilder } from "./modules/MessageBuilder.js";
+import { StreamHandler } from "./modules/StreamHandler.js";
+import { GenerationHandler } from "./modules/GenerationHandler.js";
+import { TelemetryHandler } from "./modules/TelemetryHandler.js";
+import { Utilities } from "./modules/Utilities.js";
+import { ToolsManager } from "./modules/ToolsManager.js";
+import { TTSProcessor } from "../utils/ttsProcessor.js";
 
 /**
  * Abstract base class for all AI providers
@@ -68,6 +59,14 @@ export abstract class BaseProvider implements AIProvider {
   protected userId?: string;
   protected neurolink?: NeuroLink; // Reference to actual NeuroLink instance for MCP tools
 
+  // Composition modules - Single Responsibility Principle
+  private readonly messageBuilder: MessageBuilder;
+  private readonly streamHandler: StreamHandler;
+  private readonly generationHandler: GenerationHandler;
+  private readonly telemetryHandler: TelemetryHandler;
+  private readonly utilities: Utilities;
+  private readonly toolsManager: ToolsManager;
+
   constructor(
     modelName?: string,
     providerName?: AIProviderName,
@@ -78,6 +77,47 @@ export abstract class BaseProvider implements AIProvider {
     this.providerName = providerName || this.getProviderName();
     this.neurolink = neurolink;
     this.middlewareOptions = middleware;
+
+    // Initialize composition modules
+    this.messageBuilder = new MessageBuilder(this.providerName, this.modelName);
+    this.streamHandler = new StreamHandler(this.providerName, this.modelName);
+    this.generationHandler = new GenerationHandler(
+      this.providerName,
+      this.modelName,
+      () => this.supportsTools(),
+      (options, type) =>
+        this.getStreamTelemetryConfig(options, type as "stream" | "generate"),
+      (toolCalls, toolResults, options, timestamp) =>
+        this.handleToolExecutionStorage(
+          toolCalls,
+          toolResults,
+          options,
+          timestamp,
+        ),
+    );
+    this.telemetryHandler = new TelemetryHandler(
+      this.providerName,
+      this.modelName,
+      this.neurolink,
+    );
+    this.utilities = new Utilities(
+      this.providerName,
+      this.modelName,
+      this.defaultTimeout,
+      this.middlewareOptions,
+    );
+    this.toolsManager = new ToolsManager(
+      this.providerName,
+      this.directTools,
+      this.neurolink,
+      {
+        isZodSchema: (schema) => this.isZodSchema(schema),
+        convertToolResult: (result) => this.convertToolResult(result),
+        createPermissiveZodSchema: () => this.createPermissiveZodSchema(),
+        fixSchemaForOpenAIStrictMode: (schema) =>
+          this.fixSchemaForOpenAIStrictMode(schema),
+      },
+    );
   }
 
   /**
@@ -103,28 +143,62 @@ export abstract class BaseProvider implements AIProvider {
   ): Promise<StreamResult> {
     const options = this.normalizeStreamOptions(optionsOrPrompt);
 
+    logger.info(`Starting stream`, {
+      provider: this.providerName,
+      hasTools: !options.disableTools && this.supportsTools(),
+      disableTools: !!options.disableTools,
+      supportsTools: this.supportsTools(),
+      inputLength: options.input?.text?.length || 0,
+      maxTokens: options.maxTokens,
+      temperature: options.temperature,
+      timestamp: Date.now(),
+    });
+
     // CRITICAL FIX: Always prefer real streaming over fake streaming
     // Try real streaming first, use fake streaming only as fallback
     try {
+      logger.debug(`Attempting real streaming`, {
+        provider: this.providerName,
+        timestamp: Date.now(),
+      });
+
       const realStreamResult = await this.executeStream(
         options,
         analysisSchema,
       );
+
+      logger.info(`Real streaming succeeded`, {
+        provider: this.providerName,
+        timestamp: Date.now(),
+      });
 
       // If real streaming succeeds, return it (with tools support via Vercel AI SDK)
       return realStreamResult;
     } catch (realStreamError) {
       logger.warn(
         `Real streaming failed for ${this.providerName}, falling back to fake streaming:`,
-        realStreamError,
+        {
+          error:
+            realStreamError instanceof Error
+              ? realStreamError.message
+              : String(realStreamError),
+          timestamp: Date.now(),
+        },
       );
 
       // Fallback to fake streaming only if real streaming fails AND tools are enabled
       if (!options.disableTools && this.supportsTools()) {
         try {
+          logger.info(`Starting fake streaming with tools`, {
+            provider: this.providerName,
+            supportsTools: this.supportsTools(),
+            timestamp: Date.now(),
+          });
+
           // Convert stream options to text generation options
           const textOptions: TextGenerationOptions = {
             prompt: options.input?.text || "",
+            input: options.input,
             systemPrompt: options.systemPrompt,
             temperature: options.temperature,
             maxTokens: options.maxTokens,
@@ -138,9 +212,25 @@ export abstract class BaseProvider implements AIProvider {
             evaluationDomain: options.evaluationDomain,
             toolUsageContext: options.toolUsageContext,
             context: options.context as Record<string, JsonValue> | undefined,
+            csvOptions: options.csvOptions,
           };
 
+          logger.debug(`Calling generate for fake streaming`, {
+            provider: this.providerName,
+            maxSteps: textOptions.maxSteps,
+            disableTools: textOptions.disableTools,
+            timestamp: Date.now(),
+          });
+
           const result = await this.generate(textOptions, analysisSchema);
+
+          logger.info(`Generate completed for fake streaming`, {
+            provider: this.providerName,
+            hasContent: !!result?.content,
+            contentLength: result?.content?.length || 0,
+            toolsUsed: result?.toolsUsed?.length || 0,
+            timestamp: Date.now(),
+          });
 
           // Create a synthetic stream from the generate result that simulates progressive delivery
           return {
@@ -164,9 +254,18 @@ export abstract class BaseProvider implements AIProvider {
                     buffer = "";
 
                     // Small delay to simulate streaming (1-10ms)
-                    await new Promise((resolve) =>
-                      setTimeout(resolve, Math.random() * 9 + 1),
-                    );
+                    await new Promise((resolve, reject) => {
+                      const timeoutId = setTimeout(
+                        resolve,
+                        Math.random() * 9 + 1,
+                      );
+                      // Handle potential timeout issues
+                      if (!timeoutId) {
+                        reject(new Error("Failed to create timeout"));
+                      }
+                    }).catch((err) => {
+                      logger.error("Error in streaming delay:", err);
+                    });
                   }
                 }
 
@@ -218,8 +317,164 @@ export abstract class BaseProvider implements AIProvider {
   }
 
   /**
+   * Prepare generation context including tools and model
+   */
+  private async prepareGenerationContext(
+    options: TextGenerationOptions,
+  ): Promise<{
+    tools: Record<string, Tool>;
+    model: LanguageModelV1;
+  }> {
+    const shouldUseTools = !options.disableTools && this.supportsTools();
+    const baseTools = shouldUseTools ? await this.getAllTools() : {};
+    const tools = shouldUseTools
+      ? {
+          ...baseTools,
+          ...(options.tools || {}),
+        }
+      : {};
+
+    logger.debug(`Final tools prepared for AI`, {
+      provider: this.providerName,
+      directTools: getKeyCount(baseTools),
+      directToolNames: getKeysAsString(baseTools),
+      externalTools: getKeyCount(options.tools || {}),
+      externalToolNames: getKeysAsString(options.tools || {}),
+      totalTools: getKeyCount(tools),
+      totalToolNames: getKeysAsString(tools),
+      shouldUseTools,
+      timestamp: Date.now(),
+    });
+
+    const model = await this.getAISDKModelWithMiddleware(options);
+    return { tools, model };
+  }
+
+  /**
+   * Build messages array for generation - delegated to MessageBuilder
+   */
+  private async buildMessages(
+    options: TextGenerationOptions,
+  ): Promise<CoreMessage[]> {
+    return this.messageBuilder.buildMessages(options);
+  }
+
+  /**
+   * Build messages array for streaming operations - delegated to MessageBuilder
+   * This is a protected helper method that providers can use to build messages
+   * with automatic multimodal detection, eliminating code duplication
+   *
+   * @param options - Stream options or text generation options
+   * @returns Promise resolving to CoreMessage array ready for AI SDK
+   */
+  protected async buildMessagesForStream(
+    options: StreamOptions | TextGenerationOptions,
+  ): Promise<CoreMessage[]> {
+    return this.messageBuilder.buildMessagesForStream(options);
+  }
+
+  /**
+   * Execute the generation with AI SDK - delegated to GenerationHandler
+   */
+  private async executeGeneration(
+    model: LanguageModelV1,
+    messages: CoreMessage[],
+    tools: Record<string, Tool>,
+    options: TextGenerationOptions,
+  ): Promise<Awaited<ReturnType<typeof generateText>>> {
+    return this.generationHandler.executeGeneration(
+      model,
+      messages,
+      tools,
+      options,
+    );
+  }
+
+  /**
+   * Log generation completion information - delegated to GenerationHandler
+   */
+  private logGenerationComplete(
+    generateResult: Awaited<ReturnType<typeof generateText>>,
+  ): void {
+    this.generationHandler.logGenerationComplete(generateResult);
+  }
+
+  /**
+   * Record performance metrics - delegated to TelemetryHandler
+   */
+  private async recordPerformanceMetrics(
+    usage:
+      | { promptTokens: number; completionTokens: number; totalTokens: number }
+      | undefined,
+    responseTime: number,
+  ): Promise<void> {
+    await this.telemetryHandler.recordPerformanceMetrics(usage, responseTime);
+  }
+
+  /**
+   * Extract tool information from generation result - delegated to GenerationHandler
+   */
+  private extractToolInformation(
+    generateResult: Awaited<ReturnType<typeof generateText>>,
+  ): {
+    toolsUsed: string[];
+    toolExecutions: Array<{
+      name: string;
+      input: StandardRecord;
+      output: unknown;
+    }>;
+  } {
+    return this.generationHandler.extractToolInformation(generateResult);
+  }
+
+  /**
+   * Format the enhanced result - delegated to GenerationHandler
+   */
+  private formatEnhancedResult(
+    generateResult: Awaited<ReturnType<typeof generateText>>,
+    tools: Record<string, Tool>,
+    toolsUsed: string[],
+    toolExecutions: Array<{
+      name: string;
+      input: StandardRecord;
+      output: unknown;
+    }>,
+    options: TextGenerationOptions,
+  ): EnhancedGenerateResult {
+    return this.generationHandler.formatEnhancedResult(
+      generateResult,
+      tools,
+      toolsUsed,
+      toolExecutions,
+      options,
+    );
+  }
+
+  /**
+   * Analyze AI response structure and log detailed debugging information - delegated to GenerationHandler
+   */
+  private analyzeAIResponse(result: Record<string, unknown>): void {
+    this.generationHandler.analyzeAIResponse(result);
+  }
+
+  /**
    * Text generation method - implements AIProvider interface
    * Tools are always available unless explicitly disabled
+   *
+   * Supports Text-to-Speech (TTS) audio generation in two modes:
+   * 1. Direct synthesis (default): TTS synthesizes the input text without AI generation
+   * 2. AI response synthesis: TTS synthesizes the AI-generated response after generation
+   *
+   * When TTS is enabled with useAiResponse=false (default), the method returns early with
+   * only the audio result, skipping AI generation entirely for optimal performance.
+   *
+   * When TTS is enabled with useAiResponse=true, the method performs full AI generation
+   * and then synthesizes the AI response to audio.
+   *
+   * @param optionsOrPrompt - Generation options or prompt string
+   * @param _analysisSchema - Optional analysis schema (not used)
+   * @returns Enhanced result with optional audio field containing TTSResult
+   *
    * IMPLEMENTATION NOTE: Uses streamText() under the hood and accumulates results
    * for consistency and better performance
    */
@@ -228,268 +483,116 @@ export abstract class BaseProvider implements AIProvider {
     _analysisSchema?: ValidationSchema,
   ): Promise<EnhancedGenerateResult | null> {
     const options = this.normalizeTextOptions(optionsOrPrompt);
-
-    // Validate options before proceeding
     this.validateOptions(options);
-
     const startTime = Date.now();
 
     try {
-      // Import streamText dynamically to avoid circular dependencies
-      // Using streamText instead of generateText for unified implementation
-      const { streamText } = await import("ai");
+      // ===== TTS MODE 1: Direct Input Synthesis (useAiResponse=false) =====
+      // Synthesize input text directly without AI generation
+      // This is optimal for simple read-aloud scenarios
+      if (options.tts?.enabled && !options.tts?.useAiResponse) {
+        const textToSynthesize = options.prompt ?? options.input?.text ?? "";
 
-      // Get ALL available tools (direct + MCP + external from options)
-      const shouldUseTools = !options.disableTools && this.supportsTools();
-      const baseTools = shouldUseTools ? await this.getAllTools() : {};
-      const tools = shouldUseTools
-        ? {
-            ...baseTools,
-            ...(options.tools || {}), // Include external tools passed from NeuroLink
-          }
-        : {};
+        // Build base result structure - common to both paths
+        const baseResult: EnhancedGenerateResult = {
+          content: textToSynthesize,
+          provider: options.provider ?? this.providerName,
+          model: this.modelName,
+          usage: { input: 0, output: 0, total: 0 },
+        };
 
-      // DEBUG: Log detailed tool information for generate
-      logger.debug("BaseProvider Generate - Tool Loading Debug", {
-        provider: this.providerName,
-        shouldUseTools,
-        baseToolsProvided: !!baseTools,
-        baseToolCount: baseTools ? Object.keys(baseTools).length : 0,
-        finalToolCount: tools ? Object.keys(tools).length : 0,
-        toolNames: tools ? Object.keys(tools).slice(0, 10) : [],
-        disableTools: options.disableTools,
-        supportsTools: this.supportsTools(),
-        externalToolsCount: options.tools
-          ? Object.keys(options.tools).length
-          : 0,
-      });
+        try {
+          const ttsResult = await TTSProcessor.synthesize(
+            textToSynthesize,
+            options.provider ?? this.providerName,
+            options.tts,
+          );
+          baseResult.audio = ttsResult;
+        } catch (ttsError) {
+          logger.error(
+            `TTS synthesis failed in Mode 1 (direct input synthesis):`,
+            ttsError,
+          );
+          // baseResult remains without audio - graceful degradation
+        }
 
-      if (tools && Object.keys(tools).length > 0) {
-        logger.debug("BaseProvider Generate - First 5 Tools Detail", {
-          provider: this.providerName,
-          tools: Object.keys(tools)
-            .slice(0, 5)
-            .map((name) => ({
-              name,
-              description: tools[name]?.description?.substring(0, 100),
-            })),
-        });
+        // Call enhanceResult for consistency - enables analytics/evaluation for TTS-only requests
+        return await this.enhanceResult(baseResult, options, startTime);
       }
-      logger.debug(`[BaseProvider.generate] Tools for ${this.providerName}:`, {
-        directTools: getKeyCount(baseTools),
-        directToolNames: getKeysAsString(baseTools),
-        externalTools: getKeyCount(options.tools || {}),
-        externalToolNames: getKeysAsString(options.tools || {}),
-        totalTools: getKeyCount(tools),
-        totalToolNames: getKeysAsString(tools),
-      });
 
-      const model = await this.getAISDKModelWithMiddleware(options);
-
-      // Build proper message array with conversation history
-      const messages = buildMessagesArray(options);
-
-      // Use streamText and accumulate results instead of generateText
-      const streamResult = await streamText({
+      // ===== Normal AI Generation Flow =====
+      const { tools, model } = await this.prepareGenerationContext(options);
+      const messages = await this.buildMessages(options);
+      const generateResult = await this.executeGeneration(
         model,
-        messages: messages,
+        messages,
         tools,
-        maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
-        toolChoice: shouldUseTools ? "auto" : "none",
-        temperature: options.temperature,
-        maxTokens: options.maxTokens, // No default limit - unlimited unless specified
-      });
+        options,
+      );
 
-      // Accumulate the streamed content
-      let accumulatedContent = "";
+      this.analyzeAIResponse(
+        generateResult as unknown as Record<string, unknown>,
+      );
+      this.logGenerationComplete(generateResult);
 
-      // Wait for the stream to complete and accumulate content
-      for await (const chunk of streamResult.textStream) {
-        accumulatedContent += chunk;
-      }
-      // Get the final result - this should include usage, toolCalls, etc.
-      const usage = await streamResult.usage;
-      const toolCalls = await streamResult.toolCalls;
-      const toolResults = await streamResult.toolResults;
       const responseTime = Date.now() - startTime;
+      await this.recordPerformanceMetrics(generateResult.usage, responseTime);
 
-      // Create a result object compatible with generateText format
-      const result = {
-        text: accumulatedContent,
-        usage: usage,
-        toolCalls: toolCalls,
-        toolResults: toolResults,
-        steps: (streamResult as unknown as { steps?: unknown[] }).steps, // Include steps for tool execution tracking
-      };
+      const { toolsUsed, toolExecutions } =
+        this.extractToolInformation(generateResult);
+      let enhancedResult = this.formatEnhancedResult(
+        generateResult,
+        tools,
+        toolsUsed,
+        toolExecutions,
+        options,
+      );
 
-      try {
-        const actualCost = await this.calculateActualCost(
-          usage || { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-        );
+      // ===== TTS MODE 2: AI Response Synthesis (useAiResponse=true) =====
+      // Synthesize AI-generated response after generation completes
+      if (options.tts?.enabled && options.tts?.useAiResponse) {
+        const aiResponse = enhancedResult.content;
+        const provider = options.provider ?? this.providerName;
 
-        recordProviderPerformanceFromMetrics(this.providerName, {
-          responseTime,
-          tokensGenerated: usage?.totalTokens || 0,
-          cost: actualCost,
-          success: true,
-        });
-
-        // Show what the system learned (updated to include cost)
-        const optimizedProvider = getPerformanceOptimizedProvider("speed");
-        logger.debug(`🚀 Performance recorded for ${this.providerName}:`, {
-          responseTime: `${responseTime}ms`,
-          tokens: usage?.totalTokens || 0,
-          estimatedCost: `$${actualCost.toFixed(6)}`,
-          recommendedSpeedProvider: optimizedProvider?.provider || "none",
-        });
-      } catch (perfError) {
-        logger.warn("⚠️ Performance recording failed:", perfError);
-      }
-
-      // Extract tool names from tool calls for tracking
-      // AI SDK puts tool calls in steps array for multi-step generation
-      const toolsUsed: string[] = [];
-
-      // First check direct tool calls (fallback)
-      if (toolCalls && toolCalls.length > 0) {
-        toolsUsed.push(
-          ...toolCalls.map((tc) => {
-            return tc.toolName || "unknown";
-          }),
-        );
-      }
-
-      // Then check steps for tool calls (primary source for multi-step)
-      if (
-        (result as unknown as AISDKGenerateResult).steps &&
-        Array.isArray((result as unknown as AISDKGenerateResult).steps)
-      ) {
-        for (const step of (result as unknown as AISDKGenerateResult).steps ||
-          []) {
-          if (step?.toolCalls && Array.isArray(step.toolCalls)) {
-            toolsUsed.push(
-              ...step.toolCalls.map((tc) => {
-                return tc.toolName || tc.name || "unknown";
-              }),
+        // Validate AI response and provider before synthesis
+        if (aiResponse && provider) {
+          try {
+            const ttsResult = await TTSProcessor.synthesize(
+              aiResponse,
+              provider,
+              options.tts,
             );
+
+            // Add audio to enhanced result (TTSProcessor already includes latency in metadata)
+            enhancedResult = {
+              ...enhancedResult,
+              audio: ttsResult,
+            };
+          } catch (ttsError) {
+            // Log TTS error but continue with text-only result
+            logger.error(
+              `TTS synthesis failed in Mode 2 (AI response synthesis):`,
+              ttsError,
+            );
+            // enhancedResult remains unchanged (no audio field added)
           }
+        } else {
+          logger.warn(`TTS synthesis skipped despite being enabled`, {
+            provider: this.providerName,
+            hasAiResponse: !!aiResponse,
+            aiResponseLength: aiResponse?.length ?? 0,
+            hasProvider: !!provider,
+            ttsConfig: {
+              enabled: options.tts?.enabled,
+              useAiResponse: options.tts?.useAiResponse,
+            },
+            reason: !aiResponse
+              ? "AI response is empty or undefined"
+              : "Provider is missing",
+          });
         }
       }
 
-      // Remove duplicates
-      const uniqueToolsUsed = [...new Set(toolsUsed)];
-
-      // ✅ Extract tool executions from AI SDK result
-      const toolExecutions: Array<{
-        name: string;
-        input: StandardRecord;
-        output: unknown;
-      }> = [];
-
-      // Create a map of tool calls to their arguments for matching with results
-      const toolCallArgsMap = new Map<string, StandardRecord>();
-
-      // Extract tool executions from AI SDK result steps
-      if (
-        (result as unknown as AISDKGenerateResult).steps &&
-        Array.isArray((result as unknown as AISDKGenerateResult).steps)
-      ) {
-        for (const step of (result as unknown as AISDKGenerateResult).steps ||
-          []) {
-          // First, collect tool calls and their arguments
-          if (step?.toolCalls && Array.isArray(step.toolCalls)) {
-            for (const toolCall of step.toolCalls) {
-              const tcRecord = toolCall as UnknownRecord;
-              const toolName =
-                (tcRecord.toolName as string) ||
-                (tcRecord.name as string) ||
-                "unknown";
-              const toolId =
-                (tcRecord.toolCallId as string) ||
-                (tcRecord.id as string) ||
-                toolName;
-
-              // Extract arguments from tool call
-              let callArgs: StandardRecord = {};
-              if (tcRecord.args) {
-                callArgs = tcRecord.args as StandardRecord;
-              } else if (tcRecord.arguments) {
-                callArgs = tcRecord.arguments as StandardRecord;
-              } else if (tcRecord.parameters) {
-                callArgs = tcRecord.parameters as StandardRecord;
-              }
-
-              toolCallArgsMap.set(toolId, callArgs);
-              toolCallArgsMap.set(toolName, callArgs); // Also map by name as fallback
-            }
-          }
-
-          // Then, process tool results and match with call arguments
-          if (step?.toolResults && Array.isArray(step.toolResults)) {
-            for (const toolResult of step.toolResults) {
-              const trRecord = toolResult as UnknownRecord;
-              const toolName = (trRecord.toolName as string) || "unknown";
-              const toolId =
-                (trRecord.toolCallId as string) || (trRecord.id as string);
-
-              // Try to get arguments from the tool result first
-              let toolArgs: StandardRecord = {};
-
-              if (trRecord.args) {
-                toolArgs = trRecord.args as StandardRecord;
-              } else if (trRecord.arguments) {
-                toolArgs = trRecord.arguments as StandardRecord;
-              } else if (trRecord.parameters) {
-                toolArgs = trRecord.parameters as StandardRecord;
-              } else if (trRecord.input) {
-                toolArgs = trRecord.input as StandardRecord;
-              } else {
-                // Fallback: get arguments from the corresponding tool call
-                toolArgs = toolCallArgsMap.get(toolId || toolName) || {};
-              }
-
-              toolExecutions.push({
-                name: toolName,
-                input: toolArgs,
-                output: (trRecord.result as unknown) || "success",
-              });
-            }
-          }
-        }
-      }
-
-      // Format the result with tool executions included
-      const enhancedResult: EnhancedGenerateResult = {
-        content: result.text,
-        usage: {
-          input: result.usage?.promptTokens || 0,
-          output: result.usage?.completionTokens || 0,
-          total: result.usage?.totalTokens || 0,
-        },
-        provider: this.providerName,
-        model: this.modelName,
-        toolCalls: toolCalls
-          ? toolCalls.map((tc) => ({
-              toolCallId: tc.toolCallId || "unknown",
-              toolName: tc.toolName || "unknown",
-              args: tc.args || {},
-            }))
-          : [],
-        toolResults: (toolResults as ToolResult[]) || [],
-        toolsUsed: uniqueToolsUsed,
-        toolExecutions, // ✅ Add extracted tool executions
-        availableTools: Object.keys(tools).map((name) => {
-          const tool = tools[name] as ExtendedTool;
-          return {
-            name,
-            description: tool.description || "No description available",
-            parameters: tool.parameters || {},
-            server: tool.serverId || "direct",
-          };
-        }),
-      };
-
-      // Enhanced result with analytics and evaluation
       return await this.enhanceResult(enhancedResult, options, startTime);
     } catch (error) {
       logger.error(`Generate failed for ${this.providerName}:`, error);
@@ -514,14 +617,15 @@ export abstract class BaseProvider implements AIProvider {
   async generateText(
     options: TextGenerationOptions,
   ): Promise<TextGenerationResult> {
-    // Validate required parameters for backward compatibility
+    // Validate required parameters for backward compatibility - support both prompt and input.text
+    const promptText = options.prompt || options.input?.text;
     if (
-      !options.prompt ||
-      typeof options.prompt !== "string" ||
-      options.prompt.trim() === ""
+      !promptText ||
+      typeof promptText !== "string" ||
+      promptText.trim() === ""
     ) {
       throw new Error(
-        "GenerateText options must include prompt as a non-empty string",
+        "GenerateText options must include prompt or input.text as a non-empty string",
       );
     }
 
@@ -547,6 +651,7 @@ export abstract class BaseProvider implements AIProvider {
       enhancedWithTools: !!(result.toolsUsed && result.toolsUsed.length > 0),
       analytics: result.analytics,
       evaluation: result.evaluation,
+      audio: result.audio,
     };
   }
 
@@ -591,13 +696,32 @@ export abstract class BaseProvider implements AIProvider {
     // Get the base model
     const baseModel = await this.getAISDKModel();
 
+    logger.debug(`Retrieved base model for ${this.providerName}`, {
+      provider: this.providerName,
+      model: this.modelName,
+      hasMiddlewareConfig: !!this.middlewareOptions,
+      timestamp: Date.now(),
+    });
+
     // Check if middleware should be applied
     const middlewareOptions = this.extractMiddlewareOptions(options);
+
+    logger.debug(`Middleware extraction result`, {
+      provider: this.providerName,
+      model: this.modelName,
+      middlewareOptions,
+    });
+
     if (!middlewareOptions) {
       return baseModel;
     }
 
     try {
+      logger.debug(`Applying middleware to ${this.providerName} model`, {
+        provider: this.providerName,
+        model: this.modelName,
+        middlewareOptions,
+      });
       // Create a new factory instance with the specified options
       const factory = new MiddlewareFactory(middlewareOptions);
 
@@ -640,48 +764,12 @@ export abstract class BaseProvider implements AIProvider {
   }
 
   /**
-   * Extract middleware options from generation options. This is the single
-   * source of truth for deciding if middleware should be applied.
+   * Extract middleware options - delegated to Utilities
    */
   private extractMiddlewareOptions(
     options: TextGenerationOptions | StreamOptions,
   ): MiddlewareFactoryOptions | null {
-    // 1. Determine effective middleware config: per-request overrides global.
-    const middlewareOpts =
-      (options as { middleware?: MiddlewareFactoryOptions }).middleware ??
-      this.middlewareOptions;
-    if (!middlewareOpts) {
-      return null;
-    }
-
-    // 2. The middleware property must be an object with configuration.
-    if (typeof middlewareOpts !== "object" || middlewareOpts === null) {
-      return null;
-    }
-
-    // 3. Check if the middleware object has any actual configuration keys.
-    const fullOpts = middlewareOpts as MiddlewareFactoryOptions;
-    const hasArray = (arr?: unknown[]) => Array.isArray(arr) && arr.length > 0;
-    const hasConfig =
-      !!fullOpts.middlewareConfig ||
-      hasArray(fullOpts.enabledMiddleware) ||
-      hasArray(fullOpts.disabledMiddleware) ||
-      !!fullOpts.preset ||
-      hasArray(fullOpts.middleware);
-
-    if (!hasConfig) {
-      return null;
-    }
-
-    // 4. Return the formatted options if configuration is present.
-    return {
-      ...fullOpts,
-      global: {
-        collectStats: true,
-        continueOnError: true,
-        ...(fullOpts.global || {}),
-      },
-    };
+    return this.utilities.extractMiddlewareOptions(options);
   }
 
   // ===================
@@ -689,390 +777,60 @@ export abstract class BaseProvider implements AIProvider {
   // ===================
 
   /**
-   * Check if a schema is a Zod schema
+   * Check if a schema is a Zod schema - delegated to Utilities
    */
   private isZodSchema(schema: unknown): boolean {
-    return (
-      typeof schema === "object" &&
-      schema !== null &&
-      // Most Zod schemas have an internal _def and a parse method
-      typeof (schema as { parse?: unknown }).parse === "function"
-    );
+    return this.utilities.isZodSchema(schema);
   }
 
   /**
-   * Convert tool execution result from MCP format to standard format
+   * Convert tool execution result - delegated to Utilities
    */
   private async convertToolResult(result: unknown): Promise<unknown> {
-    // Handle MCP-style results
-    if (result && typeof result === "object" && "success" in result) {
-      const mcpResult = result as {
-        success: boolean;
-        data?: unknown;
-        error?: unknown;
-      };
-      if (mcpResult.success) {
-        return mcpResult.data;
-      } else {
-        const errorMsg =
-          typeof mcpResult.error === "string"
-            ? mcpResult.error
-            : "Tool execution failed";
-        throw new Error(errorMsg);
-      }
-    }
-    return result;
+    return this.utilities.convertToolResult(result);
   }
 
   /**
-   * Create a custom tool from tool definition
+   * Fix JSON Schema for OpenAI strict mode - delegated to Utilities
    */
-  private async createCustomToolFromDefinition(
-    toolName: string,
-    toolInfo: {
-      execute: (params: ToolArgs) => Promise<unknown>;
-      description?: string;
-      parameters?: unknown;
-    },
-  ): Promise<Tool | null> {
-    try {
-      logger.debug(`[BaseProvider] Converting custom tool: ${toolName}`);
-
-      // Convert to AI SDK tool format
-      const { tool: createAISDKTool } = await import("ai");
-      const { z } = await import("zod");
-
-      return createAISDKTool({
-        description: toolInfo.description || `Tool ${toolName}`,
-        parameters: this.isZodSchema(toolInfo.parameters)
-          ? (toolInfo.parameters as z.ZodSchema)
-          : z.object({}),
-        execute: async (params) => {
-          const result = await toolInfo.execute(params as ToolArgs);
-          return await this.convertToolResult(result);
-        },
-      });
-    } catch (toolCreationError) {
-      logger.error(`Failed to create tool: ${toolName}`, toolCreationError);
-      return null;
-    }
+  private fixSchemaForOpenAIStrictMode(
+    schema: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return this.utilities.fixSchemaForOpenAIStrictMode(schema);
   }
 
   /**
-   * Process custom tools from setupToolExecutor
-   */
-  private async processCustomTools(tools: Record<string, Tool>): Promise<void> {
-    if (!this.customTools || this.customTools.size === 0) {
-      return;
-    }
-
-    logger.debug(
-      `[BaseProvider] Loading ${this.customTools.size} custom tools from setupToolExecutor`,
-    );
-
-    for (const [toolName, toolDef] of this.customTools.entries()) {
-      logger.debug(`[BaseProvider] Processing custom tool: ${toolName}`, {
-        toolDef: typeof toolDef,
-        hasExecute:
-          toolDef && typeof toolDef === "object" && "execute" in toolDef,
-        hasName: toolDef && typeof toolDef === "object" && "name" in toolDef,
-      });
-
-      // Validate tool definition has required execute function
-      const toolInfo =
-        (toolDef as Record<string, unknown> | undefined) ||
-        ({} as Record<string, unknown>);
-      if (toolInfo && typeof toolInfo.execute === "function") {
-        const tool = await this.createCustomToolFromDefinition(
-          toolName,
-          toolInfo as {
-            execute: (params: ToolArgs) => Promise<unknown>;
-            description?: string;
-            parameters?: unknown;
-          },
-        );
-        if (tool) {
-          tools[toolName] = tool;
-        }
-      }
-    }
-
-    logger.debug(`[BaseProvider] Custom tools processing complete`, {
-      customToolsProcessed: this.customTools.size,
-    });
-  }
-
-  /**
-   * Create an external MCP tool
-   */
-  private async createExternalMCPTool(tool: {
-    name: string;
-    description?: string;
-    inputSchema?: StandardRecord;
-    serverId?: string;
-  }): Promise<Tool | null> {
-    try {
-      logger.debug(`[BaseProvider] Converting external MCP tool: ${tool.name}`);
-
-      // Convert to AI SDK tool format
-      const { tool: createAISDKTool } = await import("ai");
-
-      return createAISDKTool({
-        description: tool.description || `External MCP tool ${tool.name}`,
-        parameters: await this.convertMCPSchemaToZod(tool.inputSchema),
-        execute: async (params) => {
-          logger.debug(
-            `[BaseProvider] Executing external MCP tool: ${tool.name}`,
-            { params },
-          );
-
-          // Execute via NeuroLink's direct tool execution
-          if (
-            this.neurolink &&
-            typeof this.neurolink.executeExternalMCPTool === "function"
-          ) {
-            return await this.neurolink.executeExternalMCPTool(
-              tool.serverId || "unknown",
-              tool.name,
-              params as JsonObject,
-            );
-          } else {
-            throw new Error(
-              `Cannot execute external MCP tool: NeuroLink executeExternalMCPTool not available`,
-            );
-          }
-        },
-      });
-    } catch (toolCreationError) {
-      logger.error(
-        `Failed to create external MCP tool: ${tool.name}`,
-        toolCreationError,
-      );
-      return null;
-    }
-  }
-
-  /**
-   * Process external MCP tools
-   */
-  private async processExternalMCPTools(
-    tools: Record<string, Tool>,
-  ): Promise<void> {
-    if (
-      !this.neurolink ||
-      typeof this.neurolink.getExternalMCPTools !== "function"
-    ) {
-      logger.debug(`[BaseProvider] No external MCP tool interface available`, {
-        hasNeuroLink: !!this.neurolink,
-        hasGetExternalMCPTools:
-          this.neurolink &&
-          typeof this.neurolink.getExternalMCPTools === "function",
-      });
-      return;
-    }
-
-    try {
-      logger.debug(
-        `[BaseProvider] Loading external MCP tools for ${this.providerName}`,
-      );
-
-      const externalTools = await this.neurolink.getExternalMCPTools();
-      logger.debug(
-        `[BaseProvider] Found ${externalTools.length} external MCP tools`,
-      );
-
-      for (const tool of externalTools) {
-        const mcpTool = await this.createExternalMCPTool(tool);
-        if (mcpTool) {
-          tools[tool.name] = mcpTool;
-          logger.debug(
-            `[BaseProvider] Successfully added external MCP tool: ${tool.name}`,
-          );
-        }
-      }
-
-      logger.debug(`[BaseProvider] External MCP tools loading complete`, {
-        totalToolsAdded: externalTools.length,
-      });
-    } catch (error) {
-      logger.error(
-        `[BaseProvider] Failed to load external MCP tools for ${this.providerName}:`,
-        error,
-      );
-      // Not an error - external tools are optional
-    }
-  }
-
-  /**
-   * Process MCP tools integration
-   */
-  private async processMCPTools(tools: Record<string, Tool>): Promise<void> {
-    // MCP tools loading simplified - removed functionCalling dependency
-    if (!this.mcpTools) {
-      // Set empty tools object - MCP tools are handled at a higher level
-      this.mcpTools = {};
-    }
-
-    // Add MCP tools if available
-    if (this.mcpTools) {
-      Object.assign(tools, this.mcpTools);
-    }
-  }
-
-  /**
-   * Get all available tools - direct tools are ALWAYS available
-   * MCP tools are added when available (without blocking)
+   * Get all available tools - delegated to ToolsManager
    */
   protected async getAllTools(): Promise<Record<string, Tool>> {
-    const tools: Record<string, Tool> = {
-      ...this.directTools, // Always include direct tools
-    };
-
-    logger.debug(`[BaseProvider] getAllTools called for ${this.providerName}`, {
-      neurolinkAvailable: !!this.neurolink,
-      neurolinkType: typeof this.neurolink,
-      directToolsCount: getKeyCount(this.directTools),
-    });
-    logger.debug(
-      `[BaseProvider] Direct tools: ${getKeysAsString(this.directTools)}`,
-    );
-
-    // Process all tool types using dedicated helper methods
-    await this.processCustomTools(tools);
-    await this.processExternalMCPTools(tools);
-    await this.processMCPTools(tools);
-
-    logger.debug(
-      `[BaseProvider] getAllTools returning tools: ${getKeysAsString(tools)}`,
-    );
-
-    return tools;
+    return this.toolsManager.getAllTools();
   }
 
   /**
-   * Calculate actual cost based on token usage and provider configuration
+   * Calculate actual cost - delegated to TelemetryHandler
    */
   private async calculateActualCost(usage: {
     promptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
   }): Promise<number> {
-    try {
-      const costInfo = modelConfig.getCostInfo(
-        this.providerName,
-        this.modelName,
-      );
-      if (!costInfo) {
-        return 0; // No cost info available
-      }
-
-      const promptTokens = usage?.promptTokens || 0;
-      const completionTokens = usage?.completionTokens || 0;
-
-      // Calculate cost per 1K tokens
-      const inputCost = (promptTokens / 1000) * costInfo.input;
-      const outputCost = (completionTokens / 1000) * costInfo.output;
-
-      return inputCost + outputCost;
-    } catch (error) {
-      logger.debug(`Cost calculation failed for ${this.providerName}:`, error);
-      return 0; // Fallback to 0 on any error
-    }
+    return this.telemetryHandler.calculateActualCost(usage);
   }
 
   /**
-   * Convert MCP JSON Schema to Zod schema for AI SDK tools
-   * Handles common MCP schema patterns safely
+   * Create a permissive Zod schema - delegated to Utilities
    */
-  private async convertMCPSchemaToZod(
-    inputSchema?: StandardRecord,
-  ): Promise<ZodUnknownSchema> {
-    const { z } = await import("zod");
-
-    if (!inputSchema || typeof inputSchema !== "object") {
-      return z.object({});
-    }
-
-    try {
-      const schema = inputSchema as StandardRecord;
-      const zodFields: Record<string, ZodUnknownSchema> = {};
-
-      // Handle JSON Schema properties
-      if (schema.properties && typeof schema.properties === "object") {
-        const required = new Set(
-          Array.isArray(schema.required) ? schema.required : [],
-        );
-
-        for (const [propName, propDef] of Object.entries(schema.properties)) {
-          const prop = propDef as StandardRecord;
-          let zodType: ZodUnknownSchema;
-
-          // Convert based on JSON Schema type
-          switch (prop.type) {
-            case "string":
-              zodType = z.string();
-              if (prop.description && typeof prop.description === "string") {
-                zodType = zodType.describe(prop.description);
-              }
-              break;
-            case "number":
-            case "integer":
-              zodType = z.number();
-              if (prop.description && typeof prop.description === "string") {
-                zodType = zodType.describe(prop.description);
-              }
-              break;
-            case "boolean":
-              zodType = z.boolean();
-              if (prop.description && typeof prop.description === "string") {
-                zodType = zodType.describe(prop.description);
-              }
-              break;
-            case "array":
-              zodType = z.array(z.unknown());
-              if (prop.description && typeof prop.description === "string") {
-                zodType = zodType.describe(prop.description);
-              }
-              break;
-            case "object":
-              zodType = z.object({});
-              if (prop.description && typeof prop.description === "string") {
-                zodType = zodType.describe(prop.description);
-              }
-              break;
-            default:
-              // Unknown type, use string as fallback
-              zodType = z.string();
-              if (prop.description && typeof prop.description === "string") {
-                zodType = zodType.describe(prop.description);
-              }
-          }
-
-          // Make optional if not required
-          if (!required.has(propName)) {
-            zodType = zodType.optional();
-          }
-
-          zodFields[propName] = zodType;
-        }
-      }
-
-      return getKeyCount(zodFields) > 0 ? z.object(zodFields) : z.object({});
-    } catch (error) {
-      logger.warn(
-        `Failed to convert MCP schema to Zod, using empty schema:`,
-        error,
-      );
-      return z.object({});
-    }
+  private createPermissiveZodSchema(): ZodUnknownSchema {
+    return this.utilities.createPermissiveZodSchema();
   }
 
   /**
-   * Set session context for MCP tools
+   * Set session context for MCP tools - delegated to ToolsManager
    */
   public setSessionContext(sessionId?: string, userId?: string): void {
     this.sessionId = sessionId;
     this.userId = userId;
+    this.toolsManager.setSessionContext(sessionId, userId);
   }
 
   /**
@@ -1131,141 +889,51 @@ export abstract class BaseProvider implements AIProvider {
   }
 
   /**
-   * Validate stream options - consolidates validation from 7/10 providers
+   * Validate stream options - delegated to StreamHandler
    */
   protected validateStreamOptions(options: StreamOptions): void {
-    const validation = validateStreamOpts(options);
-
-    if (!validation.isValid) {
-      const summary = createValidationSummary(validation);
-      throw new ValidationError(
-        `Stream options validation failed: ${summary}`,
-        "options",
-        "VALIDATION_FAILED",
-        validation.suggestions,
-      );
-    }
-
-    // Log warnings if any
-    if (validation.warnings.length > 0) {
-      logger.warn("Stream options validation warnings:", validation.warnings);
-    }
-
-    // Additional BaseProvider-specific validation
-    if (options.maxSteps !== undefined) {
-      if (
-        options.maxSteps < STEP_LIMITS.min ||
-        options.maxSteps > STEP_LIMITS.max
-      ) {
-        throw new ValidationError(
-          `maxSteps must be between ${STEP_LIMITS.min} and ${STEP_LIMITS.max}`,
-          "maxSteps",
-          "OUT_OF_RANGE",
-          [
-            `Use a value between ${STEP_LIMITS.min} and ${STEP_LIMITS.max} for optimal performance`,
-          ],
-        );
-      }
-    }
+    this.streamHandler.validateStreamOptions(options);
   }
 
   /**
-   * Create text stream transformation - consolidates identical logic from 7/10 providers
+   * Create text stream transformation - delegated to StreamHandler
    */
   protected createTextStream(result: {
     textStream: AsyncIterable<string>;
   }): AsyncGenerator<{ content: string }> {
-    return (async function* () {
-      for await (const chunk of result.textStream) {
-        yield { content: chunk };
-      }
-    })();
+    return this.streamHandler.createTextStream(result);
   }
 
   /**
-   * Create standardized stream result - consolidates result structure
+   * Create standardized stream result - delegated to StreamHandler
    */
   protected createStreamResult(
     stream: AsyncGenerator<{ content: string }>,
     additionalProps: Partial<StreamResult> = {},
   ): StreamResult {
-    return {
-      stream,
-      provider: this.providerName,
-      model: this.modelName,
-      ...additionalProps,
-    };
+    return this.streamHandler.createStreamResult(stream, additionalProps);
   }
 
   /**
-   * Create stream analytics - consolidates analytics from 4/10 providers
+   * Create stream analytics - delegated to StreamHandler
    */
   protected async createStreamAnalytics(
     result: UnknownRecord,
     startTime: number,
     options: StreamOptions,
   ): Promise<UnknownRecord | undefined> {
-    try {
-      const { createAnalytics } = await import("./analytics.js");
-      const analytics = createAnalytics(
-        this.providerName,
-        this.modelName,
-        result,
-        Date.now() - startTime,
-        {
-          requestId: `${this.providerName}-stream-${Date.now()}`,
-          streamingMode: true,
-          ...options.context,
-        },
-      );
-      return analytics as unknown as UnknownRecord;
-    } catch (error) {
-      logger.warn(`Analytics creation failed for ${this.providerName}:`, error);
-      return undefined;
-    }
+    return this.streamHandler.createStreamAnalytics(result, startTime, options);
   }
 
   /**
-   * Handle common error patterns - consolidates error handling from multiple providers
+   * Handle common error patterns - delegated to Utilities
    */
   protected handleCommonErrors(error: unknown): Error | null {
-    if (error instanceof TimeoutError) {
-      return new Error(
-        `${this.providerName} request timed out after ${error.timeout}ms. Consider increasing timeout or using a lighter model.`,
-      );
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-
-    // Common API key errors
-    if (
-      message.includes("API_KEY_INVALID") ||
-      message.includes("Invalid API key") ||
-      message.includes("authentication") ||
-      message.includes("unauthorized")
-    ) {
-      return new Error(
-        `Invalid API key for ${this.providerName}. Please check your API key environment variable.`,
-      );
-    }
-
-    // Common rate limit errors
-    if (
-      message.includes("rate limit") ||
-      message.includes("quota") ||
-      message.includes("429")
-    ) {
-      return new Error(
-        `Rate limit exceeded for ${this.providerName}. Please wait before making more requests.`,
-      );
-    }
-
-    return null; // Not a common error, let provider handle it
+    return this.utilities.handleCommonErrors(error);
   }
 
   /**
-   * Set up tool executor for a provider to enable actual tool execution
-   * Consolidates identical setupToolExecutor logic from neurolink.ts (used in 4 places)
+   * Set up tool executor - delegated to ToolsManager
    * @param sdk - The NeuroLinkSDK instance for tool execution
    * @param functionTag - Function name for logging
    */
@@ -1276,88 +944,31 @@ export abstract class BaseProvider implements AIProvider {
     },
     functionTag: string,
   ): void {
-    // Store custom tools for use in getAllTools()
     this.customTools = sdk.customTools;
     this.toolExecutor = sdk.executeTool;
-
-    logger.debug(`[${functionTag}] Setting up tool executor for provider`, {
-      providerType: this.constructor.name,
-      availableCustomTools: sdk.customTools.size,
-      customToolsStored: !!this.customTools,
-      toolExecutorStored: !!this.toolExecutor,
-    });
-
-    // Note: Tool execution will be handled through getAllTools() -> AI SDK tools
-    // The custom tools are converted to AI SDK format in getAllTools() method
+    this.toolsManager.setupToolExecutor(sdk, functionTag);
   }
 
   // ===================
   // TEMPLATE METHODS - COMMON FUNCTIONALITY
   // ===================
 
+  /**
+   * Normalize text generation options - delegated to Utilities
+   */
   protected normalizeTextOptions(
     optionsOrPrompt: TextGenerationOptions | string,
   ): TextGenerationOptions {
-    if (typeof optionsOrPrompt === "string") {
-      const safeMaxTokens = getSafeMaxTokens(this.providerName, this.modelName);
-      return {
-        prompt: optionsOrPrompt,
-        provider: this.providerName,
-        model: this.modelName,
-        maxTokens: safeMaxTokens,
-      };
-    }
-
-    // Handle both prompt and input.text formats
-    const prompt = optionsOrPrompt.prompt || optionsOrPrompt.input?.text || "";
-    const modelName = optionsOrPrompt.model || this.modelName;
-    const providerName = optionsOrPrompt.provider || this.providerName;
-
-    // Apply safe maxTokens based on provider and model
-    const safeMaxTokens = getSafeMaxTokens(
-      providerName,
-      modelName,
-      optionsOrPrompt.maxTokens,
-    );
-
-    return {
-      ...optionsOrPrompt,
-      prompt,
-      provider: providerName,
-      model: modelName,
-      maxTokens: safeMaxTokens,
-    };
+    return this.utilities.normalizeTextOptions(optionsOrPrompt);
   }
 
+  /**
+   * Normalize stream options - delegated to Utilities
+   */
   protected normalizeStreamOptions(
     optionsOrPrompt: StreamOptions | string,
   ): StreamOptions {
-    if (typeof optionsOrPrompt === "string") {
-      const safeMaxTokens = getSafeMaxTokens(this.providerName, this.modelName);
-      return {
-        input: { text: optionsOrPrompt },
-        provider: this.providerName,
-        model: this.modelName,
-        maxTokens: safeMaxTokens,
-      };
-    }
-
-    const modelName = optionsOrPrompt.model || this.modelName;
-    const providerName = optionsOrPrompt.provider || this.providerName;
-
-    // Apply safe maxTokens based on provider and model
-    const safeMaxTokens = getSafeMaxTokens(
-      providerName,
-      modelName,
-      optionsOrPrompt.maxTokens,
-    );
-
-    return {
-      ...optionsOrPrompt,
-      provider: providerName,
-      model: modelName,
-      maxTokens: safeMaxTokens,
-    };
+    return this.utilities.normalizeStreamOptions(optionsOrPrompt);
   }
 
   protected async enhanceResult(
@@ -1401,123 +1012,67 @@ export abstract class BaseProvider implements AIProvider {
     return enhancedResult;
   }
 
+  /**
+   * Create analytics - delegated to TelemetryHandler
+   */
   protected async createAnalytics(
     result: EnhancedGenerateResult,
     responseTime: number,
     options: TextGenerationOptions,
   ): Promise<AnalyticsData> {
-    const { createAnalytics } = await import("./analytics.js");
-    return createAnalytics(
-      this.providerName,
-      this.modelName,
+    return this.telemetryHandler.createAnalytics(
       result,
       responseTime,
       options.context,
     );
   }
 
+  /**
+   * Create evaluation - delegated to TelemetryHandler
+   */
   protected async createEvaluation(
     result: EnhancedGenerateResult,
     options: TextGenerationOptions,
   ): Promise<EvaluationData> {
-    const { evaluateResponse } = await import("../core/evaluation.js");
-    const context = {
-      userQuery: options.prompt || options.input?.text || "Generated response",
-      aiResponse: result.content,
-      context: options.context,
-      primaryDomain: options.evaluationDomain,
-      assistantRole: "AI assistant",
-      conversationHistory: options.conversationHistory?.map((msg) => ({
-        role: msg.role as "user" | "assistant",
-        content: msg.content,
-      })),
-      toolUsage: options.toolUsageContext
-        ? [
-            {
-              toolName: options.toolUsageContext,
-              input: {},
-              output: {},
-              executionTime: 0,
-            },
-          ]
-        : undefined,
-      expectedOutcome: options.expectedOutcome,
-      evaluationCriteria: options.evaluationCriteria,
-    };
-    const evaluation = await evaluateResponse(context);
-    return evaluation as EvaluationData;
+    return this.telemetryHandler.createEvaluation(result, options);
   }
 
-  protected validateOptions(options: TextGenerationOptions): void {
-    const validation = validateTextGenerationOptions(options);
-
-    if (!validation.isValid) {
-      const summary = createValidationSummary(validation);
-      throw new ValidationError(
-        `Text generation options validation failed: ${summary}`,
-        "options",
-        "VALIDATION_FAILED",
-        validation.suggestions,
-      );
-    }
-
-    // Log warnings if any
-    if (validation.warnings.length > 0) {
-      logger.warn(
-        "Text generation options validation warnings:",
-        validation.warnings,
-      );
-    }
-
-    // Additional BaseProvider-specific validation
-    if (options.maxSteps !== undefined) {
-      if (
-        options.maxSteps < STEP_LIMITS.min ||
-        options.maxSteps > STEP_LIMITS.max
-      ) {
-        throw new ValidationError(
-          `maxSteps must be between ${STEP_LIMITS.min} and ${STEP_LIMITS.max}`,
-          "maxSteps",
-          "OUT_OF_RANGE",
-          [
-            `Use a value between ${STEP_LIMITS.min} and ${STEP_LIMITS.max} for optimal performance`,
-          ],
-        );
-      }
-    }
-  }
-
-  protected getProviderInfo(): { provider: string; model: string } {
-    return {
-      provider: this.providerName,
-      model: this.modelName,
-    };
-  }
   /**
-   * Get timeout value in milliseconds
+   * Validate text generation options - delegated to Utilities
+   */
+  protected validateOptions(options: TextGenerationOptions): void {
+    this.utilities.validateOptions(options);
+  }
+
+  /**
+   * Get provider information - delegated to Utilities
+   */
+  protected getProviderInfo(): { provider: string; model: string } {
+    return this.utilities.getProviderInfo();
+  }
+
+  /**
+   * Get timeout value in milliseconds - delegated to Utilities
    */
   public getTimeout(options: TextGenerationOptions | StreamOptions): number {
-    if (!options.timeout) {
-      return this.defaultTimeout;
-    }
+    return this.utilities.getTimeout(options);
+  }
 
-    if (typeof options.timeout === "number") {
-      return options.timeout;
-    }
-
-    // Parse string timeout (e.g., '30s', '2m', '1h')
-    const timeoutStr = options.timeout.toLowerCase();
-    const value = parseInt(timeoutStr);
-
-    if (timeoutStr.includes("h")) {
-      return value * 60 * 60 * 1000;
-    } else if (timeoutStr.includes("m")) {
-      return value * 60 * 1000;
-    } else if (timeoutStr.includes("s")) {
-      return value * 1000;
-    }
-
-    return this.defaultTimeout;
+  /**
+   * Check if tool executions should be stored and handle storage
+   */
+  protected async handleToolExecutionStorage(
+    toolCalls: unknown[],
+    toolResults: unknown[],
+    options: TextGenerationOptions | StreamOptions,
+    currentTime: Date,
+  ): Promise<void> {
+    return this.telemetryHandler.handleToolExecutionStorage(
+      toolCalls,
+      toolResults,
+      options,
+      currentTime,
+    );
   }
 
   /**
@@ -1560,5 +1115,57 @@ export abstract class BaseProvider implements AIProvider {
     }
 
     return chunks;
+  }
+
+  /**
+   * Create telemetry configuration for Vercel AI SDK experimental_telemetry
+   * This enables automatic OpenTelemetry tracing when telemetry is enabled
+   */
+  protected getStreamTelemetryConfig(
+    options: StreamOptions | TextGenerationOptions,
+    operationType: "stream" | "generate" = "stream",
+  ):
+    | {
+        isEnabled: boolean;
+        functionId?: string;
+        metadata?: Record<string, string | number | boolean>;
+      }
+    | undefined {
+    // Check if telemetry is enabled via NeuroLink observability config
+    if (!this.neurolink?.isTelemetryEnabled()) {
+      return undefined;
+    }
+
+    const context = options.context as Context;
+    const traceName = context?.traceName;
+    const userId = context?.userId;
+    const functionId = traceName ? traceName : userId ? userId : "guest";
+
+    const metadata: Record<string, string | number | boolean> = {
+      provider: this.providerName,
+      model: this.modelName,
+      toolsEnabled: !options.disableTools,
+      neurolink: true,
+      operationType,
+      originalProvider: this.providerName,
+    };
+
+    // Add sessionId if available
+    if ("sessionId" in options && options.sessionId) {
+      const sessionId = options.sessionId;
+      if (
+        typeof sessionId === "string" ||
+        typeof sessionId === "number" ||
+        typeof sessionId === "boolean"
+      ) {
+        metadata.sessionId = sessionId;
+      }
+    }
+
+    return {
+      isEnabled: true,
+      functionId,
+      metadata,
+    };
   }
 }

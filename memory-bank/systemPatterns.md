@@ -507,6 +507,185 @@ const REFACTORING_IMPACT = {
 
 ---
 
+## 🔄 **MULTI-TENANCY REDIS CONFIGURATION PATTERN** (2025-10-23) - PRODUCTION READY
+
+### **Hierarchical Redis Configuration**
+```typescript
+// Pattern: SDK configuration overrides environment variables
+const neurolink = new NeuroLink({
+  conversationMemory: {
+    enabled: true,
+    redisConfig: {
+      // Lighthouse's Redis instance (highest priority)
+      host: 'lighthouse-redis.internal',
+      port: 6380,
+      password: 'lighthouse-secret',
+      keyPrefix: 'lighthouse:conv:',
+      db: 1
+    }
+  }
+});
+
+// Without SDK config, falls back to environment variables:
+// REDIS_HOST=localhost
+// REDIS_PORT=6379
+// REDIS_PASSWORD=neurolink-secret
+```
+
+### **Configuration Priority Pattern**
+```typescript
+// 1. SDK Input (Highest Priority) - Lighthouse Redis
+const redisConfig = config.conversationMemory?.redisConfig || getRedisConfigFromEnv();
+
+// 2. Environment Variables (Fallback) - NeuroLink Redis
+function getRedisConfigFromEnv(): RedisStorageConfig {
+  return {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379'),
+    password: process.env.REDIS_PASSWORD,
+    keyPrefix: process.env.REDIS_KEY_PREFIX || 'neurolink:conversation:',
+    db: parseInt(process.env.REDIS_DB || '0')
+  };
+}
+```
+
+### **Source Tracking Pattern**
+```typescript
+// Enhanced logging for multi-tenant debugging
+const configSource = config.conversationMemory?.redisConfig
+  ? "SDK input (from Lighthouse)"
+  : "environment variables (NeuroLink)";
+
+logger.info("Redis conversation memory manager created successfully", {
+  configSource,
+  host: redisConfig.host || "localhost",
+  port: redisConfig.port || 6379,
+  keyPrefix: redisConfig.keyPrefix || "neurolink:conversation:",
+  maxSessions: memoryConfig.maxSessions,
+  maxTurnsPerSession: memoryConfig.maxTurnsPerSession
+});
+```
+
+### **Multi-Tenant Deployment Pattern**
+```typescript
+// Application 1: Lighthouse with dedicated Redis
+const lighthouseNeurolink = new NeuroLink({
+  conversationMemory: {
+    enabled: true,
+    redisConfig: {
+      host: 'lighthouse-redis.prod.internal',
+      port: 6380,
+      keyPrefix: 'lighthouse:prod:',
+      db: 1
+    }
+  }
+});
+
+// Application 2: NeuroLink with its own Redis
+const neurolinkInstance = new NeuroLink({
+  conversationMemory: {
+    enabled: true
+    // Uses environment variables for Redis config
+  }
+});
+
+// Result: Complete data isolation between applications
+```
+
+### **Namespace Isolation Pattern**
+```typescript
+// Different key prefixes for different tenants
+const tenantConfigs = {
+  lighthouse: {
+    keyPrefix: 'lighthouse:conv:',
+    db: 1
+  },
+  neurolink: {
+    keyPrefix: 'neurolink:conversation:',
+    db: 0
+  },
+  customApp: {
+    keyPrefix: 'myapp:chat:',
+    db: 2
+  }
+};
+
+// Each tenant's data is isolated by prefix and/or database
+```
+
+### **Backward Compatibility Pattern**
+```typescript
+// BEFORE: Only environment variables
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+// AFTER: Optional SDK override (100% backward compatible)
+const neurolink = new NeuroLink({
+  conversationMemory: {
+    enabled: true,
+    // redisConfig: undefined  // Uses environment variables
+  }
+});
+
+// Existing deployments work without changes
+```
+
+### **Type Safety Pattern**
+```typescript
+// Type-safe Redis configuration interface
+export type ConversationMemoryConfig = {
+  enabled: boolean;
+  maxSessions?: number;
+  maxTurnsPerSession?: number;
+  
+  /** Redis configuration (optional) - overrides environment variables */
+  redisConfig?: RedisStorageConfig;
+};
+
+// Redis storage configuration
+export interface RedisStorageConfig {
+  host?: string;
+  port?: number;
+  password?: string;
+  username?: string;
+  db?: number;
+  keyPrefix?: string;
+  connectionTimeout?: number;
+  ttl?: number;
+}
+```
+
+### **Configuration Validation Pattern**
+```typescript
+// Validate Redis config before initialization
+function validateRedisConfig(config: RedisStorageConfig): void {
+  if (config.port && (config.port < 1 || config.port > 65535)) {
+    throw new Error('Invalid Redis port: must be between 1-65535');
+  }
+  
+  if (config.db && (config.db < 0 || config.db > 15)) {
+    throw new Error('Invalid Redis database: must be between 0-15');
+  }
+  
+  if (config.keyPrefix && !config.keyPrefix.endsWith(':')) {
+    logger.warn('Redis keyPrefix should end with ":" for clarity');
+  }
+}
+```
+
+### **Strategic Benefits**
+```typescript
+const MULTI_TENANCY_BENEFITS = {
+  dataIsolation: 'Separate Redis instances per application',
+  operationalFlexibility: 'Independent infrastructure management',
+  debuggingSupport: 'Clear config source tracking in logs',
+  zeroMigration: 'Existing deployments work unchanged',
+  scalability: 'Different Redis instances for different scales'
+} as const;
+```
+
+---
+
 ## 🧠 **AUTOMATIC CONTEXT SUMMARIZATION PATTERN** (2025-08-18)
 
 ### **Integrated Conversation Memory Activation**
@@ -534,6 +713,232 @@ await neurolink.generate({
 - **Correct Order of Operations:** The manager now correctly adds a new turn, then checks for summarization, and finally performs turn-based truncation, preventing race conditions.
 - **Non-Breaking:** The feature remains opt-in via the `conversationMemory` configuration.
 - **Recursion-Safe:** The summarization logic creates a new, memory-disabled `NeuroLink` instance for the summarization call, preventing infinite loops.
+
+---
+
+## 💬 **INTERACTIVE LOOP MODE ARCHITECTURE** (2025-09-06) - PRODUCTION READY
+
+### **Core Loop Session Architecture**
+```typescript
+// Persistent interactive CLI session with state management
+export class LoopSession {
+  private initializeCliParser: () => Argv;
+  private isRunning = false;
+  private sessionId?: string;
+  private sessionVariablesSchema: Record<string, OptionSchema>;
+
+  async start(): Promise<void> {
+    // Initialize global session state with nanoid-based session ID
+    this.sessionId = globalSession.setLoopSession(this.conversationMemoryConfig);
+    
+    // Display ASCII banner and session info
+    logger.always(chalk.bold.green(NEUROLINK_BANNER));
+    
+    // Enter interactive prompt loop
+    while (this.isRunning) {
+      const answers = await inquirer.prompt([{
+        type: "input",
+        name: "command",
+        message: chalk.blue.bold("neurolink"),
+        prefix: chalk.blue.green("⎔"),
+        suffix: chalk.blue.green(" »"),
+      }]);
+    }
+  }
+}
+```
+
+### **Global Session Management Pattern**
+```typescript
+// Singleton session manager with persistent state
+export class GlobalSessionManager {
+  private static instance: GlobalSessionManager;
+  private loopSession: LoopSessionState | null = null;
+
+  setLoopSession(config?: ConversationMemoryConfig): string {
+    const sessionId = `NL_${nanoid()}`;  // Unique session identifier
+    
+    this.loopSession = {
+      neurolinkInstance: new NeuroLink(neurolinkOptions),
+      sessionId,
+      isActive: true,
+      conversationMemoryConfig: config,
+      sessionVariables: {},  // Persistent session variables
+    };
+    
+    return sessionId;
+  }
+}
+```
+
+### **Session Variable Management**
+```typescript
+// Typed session variable system
+type SessionVariableValue = string | number | boolean;
+
+interface LoopSessionState {
+  neurolinkInstance: NeuroLink;
+  sessionId: string;
+  isActive: boolean;
+  conversationMemoryConfig?: ConversationMemoryConfig;
+  sessionVariables: Record<string, SessionVariableValue>;
+}
+
+// Session commands: set, get, unset, show, clear
+// Example: set provider openai
+//          set model gpt-4
+//          get provider
+//          show  # Shows all variables
+```
+
+### **Interactive Command Processing Pattern**
+```typescript
+// Command classification and routing
+private async handleSessionCommands(command: string): Promise<boolean> {
+  const parts = command.split(" ");
+  const cmd = parts[0].toLowerCase();
+
+  switch (cmd) {
+    case "help":    // Show available commands
+    case "set":     // Set session variable with validation
+    case "get":     // Get session variable value
+    case "unset":   // Remove session variable
+    case "show":    // Display all session variables
+    case "clear":   // Clear all session variables
+    case "exit":    // Exit loop mode
+      // Handle session-specific commands
+      return true;
+    
+    default:
+      // Pass through to standard CLI command processing
+      return false;
+  }
+}
+```
+
+### **Session-Aware Error Handling Pattern**
+```typescript
+// Error handling that preserves session state
+try {
+  const yargsInstance = this.initializeCliParser();
+  await yargsInstance
+    .scriptName("")
+    .fail((msg, err) => {
+      throw err || new Error(msg);  // Re-throw for loop handling
+    })
+    .exitProcess(false)             // Prevent process exit
+    .parse(command);
+} catch (error) {
+  handleError(error as Error, "An unexpected error occurred");
+  // Continue loop instead of exiting
+}
+```
+
+### **Conversation Memory Integration**
+```typescript
+// Automatic session-based conversation memory
+const neurolinkOptions: NeuroLinkInitOptions = {};
+
+if (config?.enabled) {
+  neurolinkOptions.conversationMemory = {
+    enabled: true,
+    maxSessions: config.maxSessions,
+    maxTurnsPerSession: config.maxTurnsPerSession,
+  };
+}
+
+// Each loop session gets its own NeuroLink instance with memory
+this.loopSession = {
+  neurolinkInstance: new NeuroLink(neurolinkOptions),
+  sessionId,
+  // ... other session state
+};
+```
+
+### **Professional UX Patterns**
+```typescript
+// ASCII Banner Display
+const NEUROLINK_BANNER = `
+▗▖  ▗▖▗▄▄▄▖▗▖ ▗▖▗▄▄▖  ▗▄▖ ▗▖   ▗▄▄▄▖▗▖  ▗▖▗▖ ▗▖
+▐▛▚▖▐▌▐▌   ▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌▐▌     █  ▐▛▚▖▐▌▐▌▗▞▘
+▐▌ ▝▜▌▐▛▀▀▘▐▌ ▐▌▐▛▀▚▖▐▌ ▐▌▐▌     █  ▐▌ ▝▜▌▐▛▚▖ 
+▐▌  ▐▌▐▙▄▄▖▝▚▄▞▘▐▌ ▐▌▝▚▄▞▘▐▙▄▄▖▗▄█▄▖▐▌  ▐▌▐▌ ▐▌
+`;
+
+// Colored prompt with visual indicators
+message: chalk.blue.bold("neurolink"),
+prefix: chalk.blue.green("⎔"),
+suffix: chalk.blue.green(" »"),
+
+// Status information display
+logger.always(chalk.gray(`Session ID: ${this.sessionId}`));
+logger.always(chalk.gray("Conversation memory enabled"));
+```
+
+### **CLI Integration Architecture**
+```typescript
+// Loop mode integration in main CLI
+if (argv.loop) {
+  const loopSession = new LoopSession(
+    initializeCliParser,
+    argv.conversationMemory ? {
+      enabled: true,
+      maxSessions: argv.conversationMemory.maxSessions || 100,
+      maxTurnsPerSession: argv.conversationMemory.maxTurnsPerSession || 50,
+    } : undefined
+  );
+  
+  await loopSession.start();
+  return;  // Exit after loop ends
+}
+```
+
+### **Session Lifecycle Management**
+```typescript
+// Complete session lifecycle
+1. Session Initialization:
+   - Generate unique nanoid-based session ID
+   - Create dedicated NeuroLink instance
+   - Initialize session variables storage
+   - Display welcome banner and session info
+
+2. Interactive Loop:
+   - Present inquirer prompt
+   - Parse and classify commands
+   - Handle session commands (set/get/show/clear)
+   - Pass through CLI commands to yargs parser
+   - Maintain session state across commands
+
+3. Session Cleanup:
+   - Clear session state on exit
+   - Cleanup global session manager
+   - Display exit message
+```
+
+### **Session Variable Schema Pattern**
+```typescript
+// Type-safe session variable validation
+private sessionVariablesSchema: Record<string, OptionSchema> = textGenerationOptionsSchema;
+
+// Validation during variable setting
+const schema = this.sessionVariablesSchema[key];
+if (!schema) {
+  logger.always(chalk.red(`Error: Unknown session variable "${key}".`));
+  return;
+}
+
+// Type checking
+if (schema.type === "boolean" && typeof value !== "boolean") {
+  logger.always(chalk.red(`Error: Invalid value for "${key}". Expected a boolean.`));
+  return;
+}
+
+// Allowed values validation
+if (schema.allowedValues && !schema.allowedValues.includes(String(value))) {
+  logger.always(chalk.red(`Error: Invalid value for "${key}".`));
+  return;
+}
+```
 
 ---
 

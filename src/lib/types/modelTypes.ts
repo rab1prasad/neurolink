@@ -5,6 +5,8 @@
 
 import { z } from "zod";
 import type { JsonValue } from "./common.js";
+import { AIProviderName } from "../constants/enums.js";
+import type { TaskType } from "./taskClassificationTypes.js";
 
 /**
  * Model performance tier definition
@@ -109,47 +111,152 @@ export type DynamicModelConfig = z.infer<typeof ModelConfigSchema>;
 export type ModelRegistry = z.infer<typeof ModelRegistrySchema>;
 
 /**
- * Model name constants structure
+ * Model capabilities interface
  */
-export type ModelNameConstants = {
-  readonly [provider: string]: {
-    readonly FAST: string;
-    readonly BALANCED: string;
-    readonly QUALITY: string;
+export type ModelCapabilities = {
+  vision: boolean;
+  functionCalling: boolean;
+  codeGeneration: boolean;
+  reasoning: boolean;
+  multimodal: boolean;
+  streaming: boolean;
+  jsonMode: boolean;
+};
+
+/**
+ * Model pricing information
+ */
+export type ModelPricingInfo = {
+  inputCostPer1K: number; // Cost per 1K input tokens in USD
+  outputCostPer1K: number; // Cost per 1K output tokens in USD
+  currency: string; // Always USD for now
+};
+
+/**
+ * Model performance characteristics
+ */
+export type ModelPerformance = {
+  speed: "fast" | "medium" | "slow"; // Response speed
+  quality: "high" | "medium" | "low"; // Output quality
+  accuracy: "high" | "medium" | "low"; // Factual accuracy
+};
+
+/**
+ * Model limitations and constraints
+ */
+export type ModelLimits = {
+  maxContextTokens: number;
+  maxOutputTokens: number;
+  maxRequestsPerMinute?: number;
+  maxRequestsPerDay?: number;
+};
+
+/**
+ * Use case suitability scores (1-10 scale)
+ */
+export type UseCaseSuitability = {
+  coding: number;
+  creative: number;
+  analysis: number;
+  conversation: number;
+  reasoning: number;
+  translation: number;
+  summarization: number;
+};
+
+/**
+ * Complete model information
+ */
+export type ModelInfo = {
+  id: string;
+  name: string;
+  provider: AIProviderName;
+  description: string;
+  capabilities: ModelCapabilities;
+  pricing: ModelPricingInfo;
+  performance: ModelPerformance;
+  limits: ModelLimits;
+  useCases: UseCaseSuitability;
+  aliases: string[];
+  deprecated: boolean;
+  isLocal: boolean; // Whether the model runs locally (e.g., Ollama)
+  releaseDate?: string;
+  category: "general" | "coding" | "creative" | "vision" | "reasoning";
+};
+
+/**
+ * Model search filters
+ */
+export type ModelSearchFilters = {
+  provider?: AIProviderName | AIProviderName[];
+  capability?: keyof ModelCapabilities | (keyof ModelCapabilities)[];
+  useCase?: keyof UseCaseSuitability;
+  maxCost?: number; // Max cost per 1K tokens
+  minContextSize?: number;
+  maxContextSize?: number;
+  performance?: ModelPerformance["speed"] | ModelPerformance["quality"];
+  category?: ModelInfo["category"] | ModelInfo["category"][];
+};
+
+/**
+ * Model search result with ranking
+ */
+export type ModelSearchResult = {
+  model: ModelInfo;
+  score: number; // Relevance score 0-1
+  matchReasons: string[];
+};
+
+/**
+ * Model recommendation context
+ */
+export type RecommendationContext = {
+  useCase?: keyof UseCaseSuitability;
+  maxCost?: number;
+  minQuality?: "low" | "medium" | "high";
+  requireCapabilities?: (keyof ModelCapabilities)[];
+  excludeProviders?: AIProviderName[];
+  contextSize?: number;
+  preferLocal?: boolean;
+};
+
+/**
+ * Model recommendation result
+ */
+export type ModelRecommendation = {
+  model: ModelInfo;
+  score: number;
+  reasoning: string[];
+  alternatives: ModelInfo[];
+};
+
+/**
+ * Model comparison result
+ */
+export type ModelComparison = {
+  models: ModelInfo[];
+  comparison: {
+    capabilities: Record<keyof ModelCapabilities, ModelInfo[]>;
+    pricing: { cheapest: ModelInfo; mostExpensive: ModelInfo };
+    performance: Record<string, ModelInfo[]>;
+    contextSize: { largest: ModelInfo; smallest: ModelInfo };
   };
 };
 
-/**
- * Model metadata for registry
- */
-export type ModelMetadata = {
-  version: string;
-  lastUpdated: string;
-  modelCount: number;
-};
-
-/**
- * Model search options
- */
-export type ModelSearchOptions = {
-  provider?: string;
-  maxPrice?: number;
-  excludeDeprecated?: boolean;
-};
-
-/**
- * Model search result
- */
-export type ModelSearchResult = {
+export type ModelRoute = {
   provider: string;
   model: string;
-  config: DynamicModelConfig;
+  reasoning: string;
+  confidence: number;
 };
 
-/**
- * Cost information structure
- */
-export type CostInfo = {
-  input: number;
-  output: number;
+export type ModelRoutingOptions = {
+  /** Override the task classification */
+  forceTaskType?: TaskType;
+  /** Require specific performance characteristics */
+  requireFast?: boolean;
+  /** Require specific capability (reasoning, creativity, etc.) */
+  requireCapability?: string;
+  /** Fallback strategy if primary choice fails */
+  fallbackStrategy?: "fast" | "reasoning" | "auto";
 };

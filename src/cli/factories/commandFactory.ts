@@ -1,6 +1,10 @@
 import type { CommandModule, Argv } from "yargs";
-import { NeuroLink } from "../../lib/neurolink.js";
-import type { UnknownRecord, JsonValue } from "../../lib/types/common.js";
+import { globalSession } from "../../lib/session/globalSessionState.js";
+import type { JsonValue } from "../../lib/types/common.js";
+import type {
+  ConversationMemoryConfig,
+  ConversationSummary,
+} from "../../lib/types/conversation.js";
 import type {
   BaseCommandArgs,
   GenerateCommandArgs,
@@ -10,8 +14,10 @@ import type {
 } from "../../lib/types/cli.js";
 import type { TokenUsage, AnalyticsData } from "../../lib/types/index.js";
 import { configManager } from "../commands/config.js";
-import { handleError } from "../index.js";
+import { handleError } from "../errorHandler.js";
 import { normalizeEvaluationData } from "../../lib/utils/evaluationUtils.js";
+import { LoopSession } from "../loop/session.js";
+import { initializeCliParser } from "../parser.js";
 
 // Use TokenUsage from standard types - no local interface needed
 import {
@@ -27,8 +33,9 @@ import ora from "ora";
 import chalk from "chalk";
 import { logger } from "../../lib/utils/logger.js";
 import fs from "fs";
-
-// Use specific command interfaces from cli.ts instead of universal interface
+import { handleSetup } from "../commands/setup.js";
+import { checkRedisAvailability } from "../../lib/utils/conversationMemoryUtils.js";
+import { saveAudioToFile, formatFileSize } from "../utils/audioFileUtils.js";
 
 /**
  * CLI Command Factory for generate commands
@@ -48,6 +55,7 @@ export class CLICommandFactory {
         "anthropic",
         "azure",
         "google-ai",
+        "google-ai-studio",
         "huggingface",
         "ollama",
         "mistral",
@@ -57,6 +65,64 @@ export class CLICommandFactory {
       default: "auto",
       description: "AI provider to use (auto-selects best available)",
       alias: "p",
+    },
+    image: {
+      type: "string" as const,
+      description:
+        "Add image file for multimodal analysis (can be used multiple times)",
+      alias: "i",
+    },
+    csv: {
+      type: "string" as const,
+      description:
+        "Add CSV file for data analysis (can be used multiple times)",
+      alias: "c",
+    },
+    pdf: {
+      type: "string" as const,
+      description: "Add PDF file for analysis (can be used multiple times)",
+    },
+    video: {
+      type: "string" as const,
+      description:
+        "Add video file for analysis (can be used multiple times) (MP4, WebM, MOV, AVI, MKV)",
+    },
+    "video-frames": {
+      type: "number" as const,
+      default: 8,
+      description: "Number of frames to extract (default: 8)",
+    },
+    "video-quality": {
+      type: "number" as const,
+      default: 85,
+      description: "Frame quality 0-100 (default: 85)",
+    },
+    "video-format": {
+      type: "string" as const,
+      choices: ["jpeg", "png"],
+      default: "jpeg",
+      description: "Frame format (default: jpeg)",
+    },
+    "transcribe-audio": {
+      type: "boolean" as const,
+      default: false,
+      description: "Extract and transcribe audio from video",
+    },
+    file: {
+      type: "string" as const,
+      description:
+        "Add file with auto-detection (CSV, image, etc. - can be used multiple times)",
+    },
+    csvMaxRows: {
+      type: "number" as const,
+      default: 1000,
+      description: "Maximum number of CSV rows to process",
+    },
+    csvFormat: {
+      type: "string" as const,
+      choices: ["raw", "markdown", "json"],
+      default: "raw",
+      description: "CSV output format (raw recommended for large files)",
     },
     model: {
       type: "string" as const,
@@ -168,7 +234,7 @@ export class CLICommandFactory {
     quiet: {
       type: "boolean" as const,
       alias: "q",
-      default: false,
+      default: true,
       description: "Suppress non-essential output",
     },
     noColor: {
@@ -185,6 +251,44 @@ export class CLICommandFactory {
       default: false,
       description: "Test command without making actual API calls (for testing)",
     },
+
+    // TTS (Text-to-Speech) options
+    tts: {
+      type: "boolean" as const,
+      default: false,
+      description: "Enable text-to-speech output",
+    },
+    ttsVoice: {
+      type: "string" as const,
+      description: "TTS voice to use (e.g., 'en-US-Neural2-C')",
+    },
+    ttsFormat: {
+      type: "string" as const,
+      choices: ["mp3", "wav", "ogg", "opus"],
+      default: "mp3",
+      description: "Audio output format",
+    },
+    ttsSpeed: {
+      type: "number" as const,
+      default: 1.0,
+      description: "Speaking rate (0.25-4.0, default: 1.0)",
+    },
+    ttsQuality: {
+      type: "string" as const,
+      choices: ["standard", "hd"],
+      default: "standard",
+      description: "Audio quality level",
+    },
+    ttsOutput: {
+      type: "string" as const,
+      description:
+        "Save TTS audio to file (supports absolute and relative paths)",
+    },
+    ttsPlay: {
+      type: "boolean" as const,
+      default: false,
+      description: "Auto-play generated audio",
+    },
   };
 
   // Helper method to build options for commands
@@ -193,6 +297,62 @@ export class CLICommandFactory {
       ...this.commonOptions,
       ...additionalOptions,
     });
+  }
+
+  // Helper method to process CLI images with smart auto-detection
+  private static processCliImages(
+    images?: string | string[],
+  ): Array<Buffer | string> | undefined {
+    if (!images) {
+      return undefined;
+    }
+
+    const imagePaths = Array.isArray(images) ? images : [images];
+
+    // Return as-is - let the smart message builder handle URL vs file detection
+    // URLs will be detected and appended to prompt text
+    // File paths will be converted to base64 by the message builder
+    return imagePaths;
+  }
+
+  // Helper method to process CLI CSV files
+  private static processCliCSVFiles(
+    csvFiles?: string | string[],
+  ): Array<Buffer | string> | undefined {
+    if (!csvFiles) {
+      return undefined;
+    }
+    return Array.isArray(csvFiles) ? csvFiles : [csvFiles];
+  }
+
+  // Helper method to process CLI PDF files
+  private static processCliPDFFiles(
+    pdfFiles?: string | string[],
+  ): Array<Buffer | string> | undefined {
+    if (!pdfFiles) {
+      return undefined;
+    }
+    return Array.isArray(pdfFiles) ? pdfFiles : [pdfFiles];
+  }
+
+  // Helper method to process CLI files with auto-detection
+  private static processCliFiles(
+    files?: string | string[],
+  ): Array<Buffer | string> | undefined {
+    if (!files) {
+      return undefined;
+    }
+    return Array.isArray(files) ? files : [files];
+  }
+
+  // Helper method to process CLI video files
+  private static processCliVideoFiles(
+    videoFiles?: string | string[],
+  ): Array<Buffer | string> | undefined {
+    if (!videoFiles) {
+      return undefined;
+    }
+    return Array.isArray(videoFiles) ? videoFiles : [videoFiles];
   }
 
   // Helper method to process common options
@@ -219,10 +379,12 @@ export class CLICommandFactory {
             contextStr.length > 100
               ? `${contextStr.slice(0, 100)}...`
               : contextStr;
-          logger.error(
-            `Invalid JSON in --context parameter: ${(err as Error).message}. Received: ${truncatedJson}`,
+          handleError(
+            new Error(
+              `Invalid JSON in --context parameter: ${(err as Error).message}. Received: ${truncatedJson}`,
+            ),
+            "Context parsing",
           );
-          process.exit(1);
         }
       } else {
         rawContext = argv.context;
@@ -272,6 +434,14 @@ export class CLICommandFactory {
       noColor: argv.noColor as boolean | undefined,
       configFile: argv.configFile as string | undefined,
       dryRun: argv.dryRun as boolean | undefined,
+      // TTS options
+      tts: argv.tts as boolean | undefined,
+      ttsVoice: argv.ttsVoice as string | undefined,
+      ttsFormat: argv.ttsFormat as "mp3" | "wav" | "ogg" | "opus" | undefined,
+      ttsSpeed: argv.ttsSpeed as number | undefined,
+      ttsQuality: argv.ttsQuality as "standard" | "hd" | undefined,
+      ttsOutput: argv.ttsOutput as string | undefined,
+      ttsPlay: argv.ttsPlay as boolean | undefined,
     };
   }
 
@@ -312,6 +482,61 @@ export class CLICommandFactory {
       }
     } else {
       logger.always(output);
+    }
+  }
+
+  /**
+   * Helper method to handle TTS audio file output
+   * Saves audio to file when --tts-output flag is provided
+   */
+  private static async handleTTSOutput(
+    result: GenerateResult | unknown,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<void> {
+    // Check if --tts-output flag is provided
+    const ttsOutputPath = options.ttsOutput as string | undefined;
+    if (!ttsOutputPath) {
+      return;
+    }
+
+    // Extract audio from result with proper type checking
+    if (!result || typeof result !== "object") {
+      return;
+    }
+    const generateResult = result as GenerateResult;
+    const audio = generateResult.audio;
+
+    if (!audio) {
+      if (!options.quiet) {
+        logger.always(
+          chalk.yellow(
+            "⚠️  No audio available in result. TTS may not be enabled for this request.",
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      // Save audio to file
+      const saveResult = await saveAudioToFile(audio, ttsOutputPath);
+
+      if (saveResult.success) {
+        if (!options.quiet) {
+          logger.always(
+            chalk.green(
+              `🔊 Audio saved to: ${saveResult.path} (${formatFileSize(saveResult.size)})`,
+            ),
+          );
+        }
+      } else {
+        handleError(
+          new Error(saveResult.error || "Failed to save audio file"),
+          "TTS Output",
+        );
+      }
+    } catch (error) {
+      handleError(error as Error, "TTS Output");
     }
   }
 
@@ -480,6 +705,10 @@ export class CLICommandFactory {
             .example(
               '$0 generate "Analyze data" --enable-analytics',
               "Enable usage analytics",
+            )
+            .example(
+              '$0 generate "Describe this video" --video path/to/video.mp4',
+              "Analyze video content",
             ),
         );
       },
@@ -514,7 +743,11 @@ export class CLICommandFactory {
               '$0 stream "Code walkthrough" --output story.txt',
               "Stream to file",
             )
-            .example('echo "Live demo" | $0 stream', "Stream from stdin"),
+            .example('echo "Live demo" | $0 stream', "Stream from stdin")
+            .example(
+              '$0 stream "Narrate this video" --video path/to/video.mp4',
+              "Stream video analysis",
+            ),
         );
       },
       handler: async (argv) =>
@@ -626,6 +859,78 @@ export class CLICommandFactory {
   }
 
   /**
+   * Create memory commands
+   */
+  static createMemoryCommands(): CommandModule {
+    return {
+      command: "memory <subcommand>",
+      describe: "Manage conversation memory",
+      builder: (yargs) => {
+        return yargs
+          .command(
+            "stats",
+            "Show conversation memory statistics",
+            (y) =>
+              this.buildOptions(y)
+                .example("$0 memory stats", "Show memory usage statistics")
+                .example(
+                  "$0 memory stats --format json",
+                  "Export stats as JSON",
+                ),
+            async (argv) =>
+              await this.executeMemoryStats(argv as BaseCommandArgs),
+          )
+          .command(
+            "history <sessionId>",
+            "Show conversation history for a session",
+            (y) =>
+              this.buildOptions(y)
+                .positional("sessionId", {
+                  type: "string" as const,
+                  description: "Session ID to retrieve history for",
+                  demandOption: true,
+                })
+                .example(
+                  "$0 memory history session-123",
+                  "Show conversation history",
+                )
+                .example(
+                  "$0 memory history session-123 --format json",
+                  "Export history as JSON",
+                ),
+            async (argv) =>
+              await this.executeMemoryHistory(
+                argv as BaseCommandArgs & { sessionId: string },
+              ),
+          )
+          .command(
+            "clear [sessionId]",
+            "Clear conversation history",
+            (y) =>
+              this.buildOptions(y)
+                .positional("sessionId", {
+                  type: "string" as const,
+                  description:
+                    "Session ID to clear (omit to clear all sessions)",
+                  demandOption: false,
+                })
+                .example("$0 memory clear", "Clear all conversation history")
+                .example(
+                  "$0 memory clear session-123",
+                  "Clear specific session",
+                ),
+            async (argv) =>
+              await this.executeMemoryClear(
+                argv as BaseCommandArgs & { sessionId?: string },
+              ),
+          )
+          .demandCommand(1, "Please specify a memory subcommand");
+      },
+      handler: () => {}, // No-op handler as subcommands handle everything
+    };
+  }
+
+  /**
    * Create config commands
    */
   static createConfigCommands(): CommandModule {
@@ -659,9 +964,11 @@ export class CLICommandFactory {
               if (result.valid) {
                 logger.always(chalk.green("✅ Configuration is valid"));
               } else {
-                logger.always(chalk.red("❌ Configuration has errors:"));
-                result.errors.forEach((error) => logger.always(`  • ${error}`));
-                process.exit(1);
+                const errorMessages = result.errors.join("\n  • ");
+                handleError(
+                  new Error(`Configuration has errors:\n  • ${errorMessages}`),
+                  "Configuration validation",
+                );
               }
             },
           )
@@ -698,9 +1005,11 @@ export class CLICommandFactory {
         if (result.valid) {
           logger.always(chalk.green("✅ Configuration is valid"));
         } else {
-          logger.always(chalk.red("❌ Configuration has errors:"));
-          result.errors.forEach((error) => logger.always(`  • ${error}`));
-          throw new Error("Configuration is invalid. See errors above.");
+          const errorMessages = result.errors.join("\n  • ");
+          handleError(
+            new Error(`Configuration has errors:\n  • ${errorMessages}`),
+            "Configuration validation",
+          );
         }
       },
     };
@@ -731,10 +1040,249 @@ export class CLICommandFactory {
   }
 
   /**
+   * Create setup command
+   */
+  static createSetupCommand(): CommandModule {
+    return {
+      command: ["setup [provider]", "s [provider]"],
+      describe: "Interactive AI provider setup wizard",
+      builder: (yargs) => {
+        return this.buildOptions(
+          yargs
+            .positional("provider", {
+              type: "string" as const,
+              description: "Specific provider to set up",
+              choices: [
+                "google-ai",
+                "openai",
+                "anthropic",
+                "azure",
+                "bedrock",
+                "vertex",
+                "huggingface",
+                "mistral",
+              ],
+            })
+            .option("list", {
+              type: "boolean" as const,
+              description: "List all available providers",
+              alias: "l",
+            })
+            .option("status", {
+              type: "boolean" as const,
+              description: "Show provider configuration status",
+            })
+            .example("$0 setup", "Interactive setup wizard")
+            .example("$0 setup --provider openai", "Setup specific provider")
+            .example("$0 setup --list", "List all providers")
+            .example("$0 setup --status", "Check provider status"),
+        );
+      },
+      handler: async (argv) =>
+        await handleSetup(
+          argv as BaseCommandArgs & {
+            provider?: string;
+            list?: boolean;
+            status?: boolean;
+          },
+        ),
+    };
+  }
+
+  /**
    * Create SageMaker commands
    */
   static createSageMakerCommands(): CommandModule {
     return SageMakerCommandFactory.createSageMakerCommands();
+  }
+
+  /**
+   * Create completion command
+   */
+  /**
+   * Create loop command
+   */
+  static createLoopCommand(): CommandModule {
+    return {
+      command: "loop",
+      describe:
+        "Start an interactive loop session with conversation management",
+      builder: (yargs) =>
+        this.buildOptions(yargs, {
+          "enable-conversation-memory": {
+            type: "boolean",
+            description: "Enable conversation memory for the loop session",
+            default: true,
+          },
+          "max-sessions": {
+            type: "number",
+            description: "Maximum number of conversation sessions to keep",
+            default: 50,
+          },
+          "max-turns-per-session": {
+            type: "number",
+            description: "Maximum turns per conversation session",
+            default: 20,
+          },
+          "auto-redis": {
+            type: "boolean",
+            description: "Automatically use Redis if available",
+            default: true,
+          },
+          resume: {
+            type: "string",
+            description:
+              "Directly resume a specific conversation by session ID",
+            alias: "r",
+          },
+          new: {
+            type: "boolean",
+            description: "Force start a new conversation (skip selection menu)",
+            alias: "n",
+          },
+          "list-conversations": {
+            type: "boolean",
+            description: "List available conversations and exit",
+            alias: "l",
+          },
+        })
+          .example(
+            "$0 loop",
+            "Start interactive session with conversation selection",
+          )
+          .example("$0 loop --new", "Force start new conversation")
+          .example("$0 loop --resume abc123", "Resume specific conversation")
+          .example(
+            "$0 loop --list-conversations",
+            "List available conversations",
+          )
+          .example("$0 loop --no-auto-redis", "Use in-memory storage only")
+          .example(
+            "$0 loop --enable-conversation-memory",
+            "Start loop with memory",
+          ),
+      handler: async (argv) => {
+        if (globalSession.getCurrentSessionId()) {
+          logger.error(
+            "A loop session is already active. Cannot start a new one.",
+          );
+          return;
+        }
+
+        let conversationMemoryConfig: ConversationMemoryConfig | undefined;
+
+        const {
+          enableConversationMemory,
+          maxSessions,
+          maxTurnsPerSession,
+          autoRedis,
+          listConversations,
+        } = argv;
+
+        if (enableConversationMemory) {
+          let storageType = "memory";
+
+          if (autoRedis) {
+            const isRedisAvailable = await checkRedisAvailability();
+            if (isRedisAvailable) {
+              storageType = "redis";
+              if (!argv.quiet) {
+                logger.always(
+                  chalk.green(
+                    "✅ Using Redis for persistent conversation memory",
+                  ),
+                );
+              }
+            } else if (argv.debug) {
+              logger.debug("Redis not available, using in-memory storage");
+            }
+          } else if (argv.debug) {
+            logger.debug("Auto-Redis disabled, using in-memory storage");
+          }
+
+          process.env.STORAGE_TYPE = storageType;
+
+          conversationMemoryConfig = {
+            enabled: true,
+            maxSessions: maxSessions as number,
+            maxTurnsPerSession: maxTurnsPerSession as number,
+          };
+        }
+
+        // Handle --list-conversations option
+        if (listConversations) {
+          const { ConversationSelector } = await import(
+            "../loop/conversationSelector.js"
+          );
+          const conversationSelector = new ConversationSelector();
+
+          try {
+            const hasConversations =
+              await conversationSelector.hasStoredConversations();
+            if (!hasConversations) {
+              logger.always(chalk.yellow("📝 No stored conversations found"));
+              return;
+            }
+
+            const conversations =
+              await conversationSelector.getAvailableConversations();
+            logger.always(chalk.blue("📋 Available Conversations:"));
+
+            conversations.forEach(
+              (conv: ConversationSummary, index: number) => {
+                const sessionId = conv.sessionId.slice(0, 12) + "...";
+                const title = conv.title || "Untitled Conversation";
+                const messageCount = conv.messageCount || 0;
+                const lastActivity = conv.updatedAt
+                  ? new Date(conv.updatedAt).toLocaleDateString()
+                  : "Unknown";
+
+                logger.always(
+                  `${index + 1}. ${chalk.cyan(sessionId)} - ${title}`,
+                );
+                logger.always(
+                  `   ${chalk.gray(`${messageCount} messages | Last: ${lastActivity}`)}`,
+                );
+              },
+            );
+
+            logger.always(
+              chalk.gray(
+                `\nUse: neurolink loop --resume <session-id> to resume a conversation`,
+              ),
+            );
+          } catch (error) {
+            logger.error("Failed to list conversations:", error);
+          } finally {
+            await conversationSelector.close();
+          }
+          return;
+        }
+
+        // Create enhanced session with direct session management options
+        const sessionOptions: {
+          directResumeSessionId?: string;
+          forceNewSession?: boolean;
+        } = {};
+
+        // Pass CLI options to session for direct session management
+        if (argv.resume && typeof argv.resume === "string") {
+          sessionOptions.directResumeSessionId = argv.resume;
+        }
+
+        if (argv.new) {
+          sessionOptions.forceNewSession = true;
+        }
+
+        const session = new LoopSession(
+          initializeCliParser,
+          conversationMemoryConfig,
+          sessionOptions,
+        );
+
+        await session.start();
+      },
+    };
   }
 
   /**
@@ -775,6 +1323,7 @@ export class CLICommandFactory {
     const spinner = argv.quiet
       ? null
       : ora("🔍 Checking AI provider status...\n").start();
+    const sdk = globalSession.getOrCreateNeuroLink();
 
     try {
       // Handle dry-run mode for provider status
@@ -836,7 +1385,6 @@ export class CLICommandFactory {
       }
 
       // Use SDK's provider diagnostic method instead of manual testing
-      const sdk = new NeuroLink();
       const results = await sdk.getProviderStatus({ quiet: !!argv.quiet });
 
       if (spinner) {
@@ -873,8 +1421,17 @@ export class CLICommandFactory {
       if (spinner) {
         spinner.fail("Provider status check failed");
       }
-      logger.error(chalk.red("Error checking provider status:"), error);
-      process.exit(1);
+      handleError(error as Error, "Provider status check");
+    } finally {
+      // Ensure all background processes are terminated
+      try {
+        await sdk.shutdownExternalMCPServers();
+      } catch (shutdownError) {
+        logger.error("Error during SDK shutdown:", shutdownError);
+      }
+      if (!globalSession.getCurrentSessionId()) {
+        process.exit();
+      }
     }
   }
 
@@ -910,7 +1467,7 @@ export class CLICommandFactory {
 
       // Process context if provided
       let inputText = argv.input as string;
-      let contextMetadata: UnknownRecord | undefined;
+      let contextMetadata: Partial<BaseContext> | undefined;
 
       if (options.context && options.contextConfig) {
         const processedContextResult = ContextFactory.processContext(
@@ -925,7 +1482,9 @@ export class CLICommandFactory {
 
         // Add context metadata for analytics
         contextMetadata = {
-          ...ContextFactory.extractAnalyticsContext(options.context),
+          ...ContextFactory.extractAnalyticsContext(
+            options.context as BaseContext,
+          ),
           contextMode: processedContextResult.config.mode,
           contextTruncated: processedContextResult.metadata.truncated,
         };
@@ -987,10 +1546,19 @@ export class CLICommandFactory {
           logger.debug("Mode: DRY-RUN (no actual API calls made)");
         }
 
-        process.exit(0);
+        if (!globalSession.getCurrentSessionId()) {
+          await this.flushLangfuseTraces();
+          process.exit(0);
+        }
       }
 
-      const sdk = new NeuroLink();
+      const sdk = globalSession.getOrCreateNeuroLink();
+      const sessionVariables = globalSession.getSessionVariables();
+      const enhancedOptions = { ...options, ...sessionVariables };
+      const sessionId = globalSession.getCurrentSessionId();
+      const context = sessionId
+        ? { ...options.context, sessionId }
+        : options.context;
 
       if (options.debug) {
         logger.debug("CLI Tools configuration:", {
@@ -999,23 +1567,69 @@ export class CLICommandFactory {
         });
       }
 
+      // Process CLI multimodal inputs
+      const imageBuffers = CLICommandFactory.processCliImages(
+        argv.image as string | string[] | undefined,
+      );
+      const csvFiles = CLICommandFactory.processCliCSVFiles(
+        argv.csv as string | string[] | undefined,
+      );
+      const pdfFiles = CLICommandFactory.processCliPDFFiles(
+        argv.pdf as string | string[] | undefined,
+      );
+      const videoFiles = CLICommandFactory.processCliVideoFiles(
+        argv.video as string | string[] | undefined,
+      );
+      const files = CLICommandFactory.processCliFiles(
+        argv.file as string | string[] | undefined,
+      );
+
+      const generateInput = {
+        text: inputText,
+        ...(imageBuffers && { images: imageBuffers }),
+        ...(csvFiles && { csvFiles }),
+        ...(pdfFiles && { pdfFiles }),
+        ...(videoFiles && { videoFiles }),
+        ...(files && { files }),
+      };
+
       const result = await sdk.generate({
-        input: { text: inputText },
-        provider: options.provider,
-        model: options.model,
-        temperature: options.temperature,
-        maxTokens: options.maxTokens,
-        systemPrompt: options.systemPrompt,
-        timeout: options.timeout,
-        disableTools: options.disableTools,
-        enableAnalytics: options.enableAnalytics,
-        enableEvaluation: options.enableEvaluation,
-        evaluationDomain: options.evaluationDomain as string | undefined,
-        toolUsageContext: options.toolUsageContext as string | undefined,
-        context: contextMetadata,
-        factoryConfig: options.domain
+        input: generateInput,
+        csvOptions: {
+          maxRows: argv.csvMaxRows as number | undefined,
+          formatStyle: argv.csvFormat as
+            | "raw"
+            | "markdown"
+            | "json"
+            | undefined,
+        },
+        videoOptions: {
+          frames: argv.videoFrames as number | undefined,
+          quality: argv.videoQuality as number | undefined,
+          format: argv.videoFormat as "jpeg" | "png" | undefined,
+          transcribeAudio: argv.transcribeAudio as boolean | undefined,
+        },
+        provider: enhancedOptions.provider,
+        model: enhancedOptions.model,
+        temperature: enhancedOptions.temperature,
+        maxTokens: enhancedOptions.maxTokens,
+        systemPrompt: enhancedOptions.systemPrompt,
+        timeout: enhancedOptions.timeout
+          ? enhancedOptions.timeout * 1000
+          : undefined,
+        disableTools: enhancedOptions.disableTools,
+        enableAnalytics: enhancedOptions.enableAnalytics,
+        enableEvaluation: enhancedOptions.enableEvaluation,
+        evaluationDomain: enhancedOptions.evaluationDomain as
+          | string
+          | undefined,
+        toolUsageContext: enhancedOptions.toolUsageContext as
+          | string
+          | undefined,
+        context: context,
+        factoryConfig: enhancedOptions.domain
           ? {
-              domainType: options.domain,
+              domainType: enhancedOptions.domain,
               enhancementType: "domain-configuration",
               validateDomainData: true,
             }
@@ -1026,8 +1640,20 @@ export class CLICommandFactory {
         spinner.succeed(chalk.green("✅ Text generated successfully!"));
       }
 
+      // Display provider and model info by default (unless quiet mode)
+      if (!options.quiet) {
+        const providerInfo = result.provider || "auto";
+        const modelInfo = result.model || "default";
+        logger.always(
+          chalk.gray(`🔧 Provider: ${providerInfo} | Model: ${modelInfo}`),
+        );
+      }
+
       // Handle output with universal formatting
       this.handleOutput(result, options);
+
+      // Handle TTS audio file output if --tts-output is provided
+      await this.handleTTSOutput(result, options);
 
       if (options.debug) {
         logger.debug("\n" + chalk.yellow("Debug Information:"));
@@ -1044,12 +1670,432 @@ export class CLICommandFactory {
         }
       }
 
-      process.exit(0);
+      if (!globalSession.getCurrentSessionId()) {
+        await this.flushLangfuseTraces();
+        process.exit(0);
+      }
     } catch (error) {
       if (spinner) {
         spinner.fail();
       }
       handleError(error as Error, "Generation");
+    }
+  }
+
+  /**
+   * Process context for streaming
+   */
+  private static async processStreamContext(
+    argv: StreamCommandArgs,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<{
+    inputText: string;
+    contextMetadata: Partial<BaseContext> | undefined;
+  }> {
+    let inputText = argv.input as string;
+    let contextMetadata: Partial<BaseContext> | undefined;
+
+    if (options.context && options.contextConfig) {
+      const processedContextResult = ContextFactory.processContext(
+        options.context as BaseContext,
+        options.contextConfig,
+      );
+
+      // Integrate context into prompt if configured
+      if (processedContextResult.processedContext) {
+        inputText = processedContextResult.processedContext + inputText;
+      }
+
+      // Add context metadata for analytics
+      contextMetadata = {
+        ...ContextFactory.extractAnalyticsContext(
+          options.context as BaseContext,
+        ),
+        contextMode: processedContextResult.config.mode,
+        contextTruncated: processedContextResult.metadata.truncated,
+      };
+
+      if (options.debug) {
+        logger.debug("Context processed for streaming:", {
+          mode: processedContextResult.config.mode,
+          truncated: processedContextResult.metadata.truncated,
+          processingTime: processedContextResult.metadata.processingTime,
+        });
+      }
+    }
+
+    return { inputText, contextMetadata };
+  }
+
+  /**
+   * Execute dry-run streaming simulation
+   */
+  private static async executeDryRunStream(
+    options: BaseCommandArgs & Record<string, unknown>,
+    contextMetadata: Partial<BaseContext> | undefined,
+  ): Promise<void> {
+    if (!options.quiet) {
+      logger.always(chalk.blue("🔄 Dry-run streaming..."));
+    }
+
+    // Simulate streaming output
+    const chunks = [
+      "Mock ",
+      "streaming ",
+      "response ",
+      "for ",
+      "testing ",
+      "purposes",
+    ];
+    let fullContent = "";
+
+    for (const chunk of chunks) {
+      process.stdout.write(chunk);
+      fullContent += chunk;
+      await new Promise((resolve) => setTimeout(resolve, 50)); // Simulate streaming delay
+    }
+
+    if (!options.quiet) {
+      process.stdout.write("\n");
+    }
+
+    // Mock analytics and evaluation for dry-run
+    if (options.enableAnalytics) {
+      const mockAnalytics: AnalyticsData = {
+        provider: (options.provider as string) || "auto",
+        model: (options.model as string) || "test-model",
+        requestDuration: 300,
+        tokenUsage: {
+          input: 10,
+          output: 15,
+          total: 25,
+        },
+        timestamp: new Date().toISOString(),
+        context: contextMetadata as JsonValue,
+      };
+
+      const mockGenerateResult: GenerateResult = {
+        success: true,
+        content: fullContent,
+        analytics: mockAnalytics,
+        model: mockAnalytics.model,
+        toolsUsed: [],
+      };
+
+      const analyticsDisplay =
+        this.formatAnalyticsForTextMode(mockGenerateResult);
+      logger.always(analyticsDisplay);
+    }
+
+    if (options.enableEvaluation) {
+      logger.always(chalk.blue("\n📊 Response Evaluation (Dry-run):"));
+      logger.always(`   Relevance: 8/10`);
+      logger.always(`   Accuracy: 9/10`);
+      logger.always(`   Completeness: 8/10`);
+      logger.always(`   Overall: 8.3/10`);
+      logger.always(`   Reasoning: Test evaluation response`);
+    }
+
+    if (options.output) {
+      fs.writeFileSync(options.output as string, fullContent);
+      if (!options.quiet) {
+        logger.always(`\nOutput saved to ${options.output}`);
+      }
+    }
+
+    if (options.debug) {
+      logger.debug(
+        "\n" + chalk.yellow("Debug Information (Dry-run Streaming):"),
+      );
+      logger.debug("Provider:", options.provider || "auto");
+      logger.debug("Model:", options.model || "test-model");
+      logger.debug("Mode: DRY-RUN (no actual API calls made)");
+    }
+
+    if (!globalSession.getCurrentSessionId()) {
+      await this.flushLangfuseTraces();
+      process.exit(0);
+    }
+  }
+
+  /**
+   * Execute real streaming with timeout handling
+   */
+  private static async executeRealStream(
+    argv: StreamCommandArgs,
+    options: BaseCommandArgs & Record<string, unknown>,
+    inputText: string,
+    contextMetadata: Partial<BaseContext> | undefined,
+  ): Promise<string> {
+    const sdk = globalSession.getOrCreateNeuroLink();
+    const sessionVariables = globalSession.getSessionVariables();
+    const enhancedOptions = { ...options, ...sessionVariables };
+    const sessionId = globalSession.getCurrentSessionId();
+    const context = sessionId
+      ? { ...contextMetadata, sessionId }
+      : contextMetadata;
+
+    // Process CLI multimodal inputs
+    const imageBuffers = CLICommandFactory.processCliImages(
+      argv.image as string | string[] | undefined,
+    );
+    const csvFiles = CLICommandFactory.processCliCSVFiles(
+      argv.csv as string | string[] | undefined,
+    );
+    const pdfFiles = CLICommandFactory.processCliPDFFiles(
+      argv.pdf as string | string[] | undefined,
+    );
+    const videoFiles = CLICommandFactory.processCliVideoFiles(
+      argv.video as string | string[] | undefined,
+    );
+    const files = CLICommandFactory.processCliFiles(
+      argv.file as string | string[] | undefined,
+    );
+
+    const stream = await sdk.stream({
+      input: {
+        text: inputText,
+        ...(imageBuffers && { images: imageBuffers }),
+        ...(csvFiles && { csvFiles }),
+        ...(pdfFiles && { pdfFiles }),
+        ...(videoFiles && { videoFiles }),
+        ...(files && { files }),
+      },
+      csvOptions: {
+        maxRows: argv.csvMaxRows as number | undefined,
+        formatStyle: argv.csvFormat as "raw" | "markdown" | "json" | undefined,
+      },
+      videoOptions: {
+        frames: argv.videoFrames as number | undefined,
+        quality: argv.videoQuality as number | undefined,
+        format: argv.videoFormat as "jpeg" | "png" | undefined,
+        transcribeAudio: argv.transcribeAudio as boolean | undefined,
+      },
+      provider: enhancedOptions.provider as string | undefined,
+      model: enhancedOptions.model as string | undefined,
+      temperature: enhancedOptions.temperature as number | undefined,
+      maxTokens: enhancedOptions.maxTokens as number | undefined,
+      systemPrompt: enhancedOptions.systemPrompt as string | undefined,
+      timeout: enhancedOptions.timeout
+        ? (enhancedOptions.timeout as number) * 1000
+        : undefined,
+      disableTools: enhancedOptions.disableTools as boolean | undefined,
+      enableAnalytics: enhancedOptions.enableAnalytics as boolean | undefined,
+      enableEvaluation: enhancedOptions.enableEvaluation as boolean | undefined,
+      evaluationDomain: enhancedOptions.evaluationDomain as string | undefined,
+      toolUsageContext: enhancedOptions.toolUsageContext as string | undefined,
+      context: context,
+      factoryConfig: enhancedOptions.domain
+        ? {
+            domainType: enhancedOptions.domain as string,
+            enhancementType: "domain-configuration",
+            validateDomainData: true,
+          }
+        : undefined,
+    });
+
+    const fullContent = await this.processStreamWithTimeout(stream, options);
+
+    await this.displayStreamResults(stream, fullContent, options);
+
+    return fullContent;
+  }
+
+  /**
+   * Process stream with timeout handling
+   */
+  private static async processStreamWithTimeout(
+    stream: { stream: AsyncIterable<{ content: string } | { type: "audio" }> },
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<string> {
+    let fullContent = "";
+    let contentReceived = false;
+    const abortController = new AbortController();
+
+    // Create timeout promise for stream consumption (default: 30 seconds, respects user-provided timeout)
+    const streamTimeout =
+      options.timeout && typeof options.timeout === "number"
+        ? options.timeout * 1000
+        : 30000;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      const timeoutId = setTimeout(() => {
+        if (!contentReceived) {
+          const timeoutError = new Error(
+            `\n❌ Stream timeout - no content received within ${streamTimeout / 1000} seconds\n` +
+              "This usually indicates authentication or network issues\n\n" +
+              "🔧 Try these steps:\n" +
+              "1. Check your provider credentials are configured correctly\n" +
+              `2. Test generate mode: neurolink generate "test" --provider ${options.provider}\n` +
+              `3. Use debug mode: neurolink stream "test" --provider ${options.provider} --debug`,
+          );
+          reject(timeoutError);
+        }
+      }, streamTimeout);
+
+      // Clean up timeout when aborted
+      abortController.signal.addEventListener("abort", () => {
+        clearTimeout(timeoutId);
+      });
+    });
+
+    try {
+      // Process the stream with timeout handling
+      const streamIterator = stream.stream[Symbol.asyncIterator]();
+      let timeoutActive = true;
+
+      while (true) {
+        let nextResult;
+
+        if (timeoutActive && !contentReceived) {
+          // Race between next chunk and timeout for first chunk only
+          nextResult = await Promise.race([
+            streamIterator.next(),
+            timeoutPromise,
+          ]);
+        } else {
+          // No timeout for subsequent chunks
+          nextResult = await streamIterator.next();
+        }
+
+        if (nextResult.done) {
+          break;
+        }
+
+        if (!contentReceived) {
+          contentReceived = true;
+          timeoutActive = false;
+          abortController.abort(); // Cancel timeout
+        }
+
+        if (options.delay && (options.delay as number) > 0) {
+          // Demo mode - add delay between chunks
+          await new Promise((resolve) =>
+            setTimeout(resolve, options.delay as number),
+          );
+        }
+
+        const evt: unknown = nextResult.value;
+        const isText = (o: unknown): o is { content: string } =>
+          !!o &&
+          typeof o === "object" &&
+          typeof (o as Record<string, unknown>).content === "string";
+        const isAudio = (o: unknown): o is { type: "audio" } =>
+          !!o &&
+          typeof o === "object" &&
+          (o as Record<string, unknown>).type === "audio";
+
+        if (isText(evt)) {
+          process.stdout.write(evt.content);
+          fullContent += evt.content;
+        } else if (isAudio(evt)) {
+          if (options.debug && !options.quiet) {
+            process.stdout.write("[audio-chunk]");
+          }
+        }
+      }
+    } catch (error) {
+      abortController.abort(); // Clean up timeout
+      throw error;
+    }
+
+    if (!contentReceived) {
+      throw new Error(
+        "\n❌ No content received from stream\n" +
+          "Check your credentials and provider configuration",
+      );
+    }
+
+    if (!options.quiet) {
+      process.stdout.write("\n");
+    }
+
+    return fullContent;
+  }
+
+  /**
+   * Display analytics and evaluation results
+   */
+  private static async displayStreamResults(
+    stream: {
+      analytics?: unknown;
+      evaluation?: unknown;
+      model?: string;
+      toolCalls?: Array<{ toolName: string }>;
+    },
+    fullContent: string,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<void> {
+    // Display analytics after streaming
+    if (options.enableAnalytics && stream.analytics) {
+      const resolvedAnalytics = await (stream.analytics instanceof Promise
+        ? stream.analytics
+        : Promise.resolve(stream.analytics));
+      const streamAnalytics = {
+        success: true,
+        content: fullContent,
+        analytics: resolvedAnalytics,
+        model: stream.model,
+        toolsUsed: stream.toolCalls?.map((tc) => tc.toolName) || [],
+      };
+      const analyticsDisplay = this.formatAnalyticsForTextMode(
+        streamAnalytics as unknown as GenerateResult,
+      );
+      logger.always(analyticsDisplay);
+    }
+
+    // Display evaluation after streaming
+    if (options.enableEvaluation && stream.evaluation) {
+      const resolvedEvaluation = await (stream.evaluation instanceof Promise
+        ? stream.evaluation
+        : Promise.resolve(stream.evaluation));
+      logger.always(chalk.blue("\n📊 Response Evaluation:"));
+      logger.always(`   Relevance: ${resolvedEvaluation.relevance}/10`);
+      logger.always(`   Accuracy: ${resolvedEvaluation.accuracy}/10`);
+      logger.always(`   Completeness: ${resolvedEvaluation.completeness}/10`);
+      logger.always(`   Overall: ${resolvedEvaluation.overall}/10`);
+      if (resolvedEvaluation.reasoning) {
+        logger.always(`   Reasoning: ${resolvedEvaluation.reasoning}`);
+      }
+    }
+  }
+
+  /**
+   * Handle stream output file writing and debug output
+   */
+  private static async handleStreamOutput(
+    options: BaseCommandArgs & Record<string, unknown>,
+    fullContent: string,
+  ): Promise<void> {
+    // Handle output file if specified
+    if (options.output) {
+      fs.writeFileSync(options.output as string, fullContent);
+      if (!options.quiet) {
+        logger.always(`\nOutput saved to ${options.output}`);
+      }
+    }
+
+    // Handle TTS audio output if --tts-output is provided
+    // Note: For streaming, TTS audio is collected during the stream
+    // and saved at the end if available
+    const ttsOutputPath = options.ttsOutput as string | undefined;
+    if (ttsOutputPath) {
+      // For now, streaming TTS output is not yet available
+      // This will be enabled when the TTS streaming infrastructure is complete
+      if (!options.quiet) {
+        logger.always(
+          chalk.yellow(
+            "⚠️  TTS audio output for streaming is not yet available. Use 'generate' command for TTS output.",
+          ),
+        );
+      }
+    }
+
+    // Debug output for streaming
+    if (options.debug) {
+      await this.logStreamDebugInfo({
+        provider: options.provider as string,
+        model: options.model as string,
+      });
     }
   }
 
@@ -1124,284 +2170,30 @@ export class CLICommandFactory {
         await new Promise((resolve) => setTimeout(resolve, options.delay));
       }
 
-      // Process context if provided (same as generate command)
-      let inputText = argv.input as string;
-      let contextMetadata: UnknownRecord | undefined;
-
-      if (options.context && options.contextConfig) {
-        const processedContextResult = ContextFactory.processContext(
-          options.context,
-          options.contextConfig,
-        );
-
-        // Integrate context into prompt if configured
-        if (processedContextResult.processedContext) {
-          inputText = processedContextResult.processedContext + inputText;
-        }
-
-        // Add context metadata for analytics
-        contextMetadata = {
-          ...ContextFactory.extractAnalyticsContext(options.context),
-          contextMode: processedContextResult.config.mode,
-          contextTruncated: processedContextResult.metadata.truncated,
-        };
-
-        if (options.debug) {
-          logger.debug("Context processed for streaming:", {
-            mode: processedContextResult.config.mode,
-            truncated: processedContextResult.metadata.truncated,
-            processingTime: processedContextResult.metadata.processingTime,
-          });
-        }
-      }
+      const { inputText, contextMetadata } = await this.processStreamContext(
+        argv,
+        options,
+      );
 
       // Handle dry-run mode for testing
       if (options.dryRun) {
-        if (!options.quiet) {
-          logger.always(chalk.blue("🔄 Dry-run streaming..."));
-        }
+        await this.executeDryRunStream(options, contextMetadata);
+        return;
+      }
 
-        // Simulate streaming output
-        const chunks = [
-          "Mock ",
-          "streaming ",
-          "response ",
-          "for ",
-          "testing ",
-          "purposes",
-        ];
-        let fullContent = "";
+      const fullContent = await this.executeRealStream(
+        argv,
+        options,
+        inputText,
+        contextMetadata,
+      );
 
-        for (const chunk of chunks) {
-          process.stdout.write(chunk);
-          fullContent += chunk;
-          await new Promise((resolve) => setTimeout(resolve, 50)); // Simulate streaming delay
-        }
+      await this.handleStreamOutput(options, fullContent);
 
-        if (!options.quiet) {
-          process.stdout.write("\n");
-        }
-
-        // Mock analytics and evaluation for dry-run
-        if (options.enableAnalytics) {
-          const mockAnalytics: AnalyticsData = {
-            provider: options.provider || "auto",
-            model: options.model || "test-model",
-            requestDuration: 300,
-            tokenUsage: {
-              input: 10,
-              output: 15,
-              total: 25,
-            },
-            timestamp: new Date().toISOString(),
-            context: contextMetadata as JsonValue,
-          };
-
-          const mockGenerateResult: GenerateResult = {
-            success: true,
-            content: fullContent,
-            analytics: mockAnalytics,
-            model: mockAnalytics.model,
-            toolsUsed: [],
-          };
-
-          const analyticsDisplay =
-            this.formatAnalyticsForTextMode(mockGenerateResult);
-          logger.always(analyticsDisplay);
-        }
-
-        if (options.enableEvaluation) {
-          logger.always(chalk.blue("\n📊 Response Evaluation (Dry-run):"));
-          logger.always(`   Relevance: 8/10`);
-          logger.always(`   Accuracy: 9/10`);
-          logger.always(`   Completeness: 8/10`);
-          logger.always(`   Overall: 8.3/10`);
-          logger.always(`   Reasoning: Test evaluation response`);
-        }
-
-        if (options.output) {
-          fs.writeFileSync(options.output, fullContent);
-          if (!options.quiet) {
-            logger.always(`\nOutput saved to ${options.output}`);
-          }
-        }
-
-        if (options.debug) {
-          logger.debug(
-            "\n" + chalk.yellow("Debug Information (Dry-run Streaming):"),
-          );
-          logger.debug("Provider:", options.provider || "auto");
-          logger.debug("Model:", options.model || "test-model");
-          logger.debug("Mode: DRY-RUN (no actual API calls made)");
-        }
-
+      if (!globalSession.getCurrentSessionId()) {
+        await this.flushLangfuseTraces();
         process.exit(0);
       }
-
-      const sdk = new NeuroLink();
-      const stream = await sdk.stream({
-        input: { text: inputText },
-        provider: options.provider,
-        model: options.model,
-        temperature: options.temperature,
-        maxTokens: options.maxTokens,
-        systemPrompt: options.systemPrompt,
-        timeout: options.timeout,
-        disableTools: options.disableTools,
-        enableAnalytics: options.enableAnalytics,
-        enableEvaluation: options.enableEvaluation,
-        context: contextMetadata,
-        factoryConfig: options.domain
-          ? {
-              domainType: options.domain,
-              enhancementType: "domain-configuration",
-              validateDomainData: true,
-            }
-          : undefined,
-      });
-
-      let fullContent = "";
-      let contentReceived = false;
-      const abortController = new AbortController();
-
-      // Create timeout promise for stream consumption (30 seconds)
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        const timeoutId = setTimeout(() => {
-          if (!contentReceived) {
-            const timeoutError = new Error(
-              "\n❌ Stream timeout - no content received within 30 seconds\n" +
-                "This usually indicates authentication or network issues\n\n" +
-                "🔧 Try these steps:\n" +
-                "1. Check your provider credentials are configured correctly\n" +
-                `2. Test generate mode: neurolink generate "test" --provider ${options.provider}\n` +
-                `3. Use debug mode: neurolink stream "test" --provider ${options.provider} --debug`,
-            );
-            reject(timeoutError);
-          }
-        }, 30000);
-
-        // Clean up timeout when aborted
-        abortController.signal.addEventListener("abort", () => {
-          clearTimeout(timeoutId);
-        });
-      });
-
-      try {
-        // Process the stream with timeout handling
-        const streamIterator = stream.stream[Symbol.asyncIterator]();
-        let timeoutActive = true;
-
-        while (true) {
-          let nextResult;
-
-          if (timeoutActive && !contentReceived) {
-            // Race between next chunk and timeout for first chunk only
-            nextResult = await Promise.race([
-              streamIterator.next(),
-              timeoutPromise,
-            ]);
-          } else {
-            // No timeout for subsequent chunks
-            nextResult = await streamIterator.next();
-          }
-
-          if (nextResult.done) {
-            break;
-          }
-
-          if (!contentReceived) {
-            contentReceived = true;
-            timeoutActive = false;
-            abortController.abort(); // Cancel timeout
-          }
-
-          if (options.delay && options.delay > 0) {
-            // Demo mode - add delay between chunks
-            await new Promise((resolve) => setTimeout(resolve, options.delay));
-          }
-
-          const evt: unknown = nextResult.value;
-          const isText = (o: unknown): o is { content: string } =>
-            !!o &&
-            typeof o === "object" &&
-            typeof (o as Record<string, unknown>).content === "string";
-          const isAudio = (o: unknown): o is { type: "audio" } =>
-            !!o &&
-            typeof o === "object" &&
-            (o as Record<string, unknown>).type === "audio";
-
-          if (isText(evt)) {
-            process.stdout.write(evt.content);
-            fullContent += evt.content;
-          } else if (isAudio(evt)) {
-            if (options.debug && !options.quiet) {
-              process.stdout.write("[audio-chunk]");
-            }
-          }
-        }
-      } catch (error) {
-        abortController.abort(); // Clean up timeout
-        throw error;
-      }
-
-      if (!contentReceived) {
-        throw new Error(
-          "\n❌ No content received from stream\n" +
-            "Check your credentials and provider configuration",
-        );
-      }
-
-      if (!options.quiet) {
-        process.stdout.write("\n");
-      }
-
-      // 🔧 NEW: Display analytics and evaluation after streaming (similar to generate command)
-      if (options.enableAnalytics && stream.analytics) {
-        const resolvedAnalytics = await (stream.analytics instanceof Promise
-          ? stream.analytics
-          : Promise.resolve(stream.analytics));
-        const streamAnalytics = {
-          success: true,
-          content: fullContent,
-          analytics: resolvedAnalytics,
-          model: stream.model,
-          toolsUsed: stream.toolCalls?.map((tc) => tc.toolName) || [],
-        };
-        const analyticsDisplay = this.formatAnalyticsForTextMode(
-          streamAnalytics as unknown as GenerateResult,
-        );
-        logger.always(analyticsDisplay);
-      }
-
-      // 🔧 NEW: Display evaluation after streaming
-      if (options.enableEvaluation && stream.evaluation) {
-        const resolvedEvaluation = await (stream.evaluation instanceof Promise
-          ? stream.evaluation
-          : Promise.resolve(stream.evaluation));
-        logger.always(chalk.blue("\n📊 Response Evaluation:"));
-        logger.always(`   Relevance: ${resolvedEvaluation.relevance}/10`);
-        logger.always(`   Accuracy: ${resolvedEvaluation.accuracy}/10`);
-        logger.always(`   Completeness: ${resolvedEvaluation.completeness}/10`);
-        logger.always(`   Overall: ${resolvedEvaluation.overall}/10`);
-        if (resolvedEvaluation.reasoning) {
-          logger.always(`   Reasoning: ${resolvedEvaluation.reasoning}`);
-        }
-      }
-
-      // Handle output file if specified
-      if (options.output) {
-        fs.writeFileSync(options.output, fullContent);
-        if (!options.quiet) {
-          logger.always(`\nOutput saved to ${options.output}`);
-        }
-      }
-
-      // 🔧 NEW: Debug output for streaming (similar to generate command)
-      if (options.debug) {
-        await this.logStreamDebugInfo(stream);
-      }
-
-      process.exit(0);
     } catch (error) {
       handleError(error as Error, "Streaming");
     }
@@ -1448,7 +2240,10 @@ export class CLICommandFactory {
         error?: string;
       }> = [];
 
-      const sdk = new NeuroLink();
+      const sdk = globalSession.getOrCreateNeuroLink();
+      const sessionVariables = globalSession.getSessionVariables();
+      const enhancedOptions = { ...options, ...sessionVariables };
+      const sessionId = globalSession.getCurrentSessionId();
 
       for (let i = 0; i < prompts.length; i++) {
         if (spinner) {
@@ -1471,11 +2266,11 @@ export class CLICommandFactory {
 
           // Process context for each batch item
           let inputText = prompts[i];
-          let contextMetadata: UnknownRecord | undefined;
+          let contextMetadata: Partial<BaseContext> | undefined;
 
           if (options.context && options.contextConfig) {
             const processedContextResult = ContextFactory.processContext(
-              options.context,
+              options.context as BaseContext,
               options.contextConfig,
             );
 
@@ -1484,28 +2279,40 @@ export class CLICommandFactory {
             }
 
             contextMetadata = {
-              ...ContextFactory.extractAnalyticsContext(options.context),
+              ...ContextFactory.extractAnalyticsContext(
+                options.context as BaseContext,
+              ),
               contextMode: processedContextResult.config.mode,
               contextTruncated: processedContextResult.metadata.truncated,
               batchIndex: i,
             };
           }
 
+          const context = sessionId
+            ? { ...contextMetadata, sessionId }
+            : contextMetadata;
+
           const result = await sdk.generate({
             input: { text: inputText },
-            provider: options.provider,
-            model: options.model,
-            temperature: options.temperature,
-            maxTokens: options.maxTokens,
-            systemPrompt: options.systemPrompt,
-            timeout: options.timeout,
-            disableTools: options.disableTools,
-            enableAnalytics: options.enableAnalytics,
-            enableEvaluation: options.enableEvaluation,
-            context: contextMetadata,
-            factoryConfig: options.domain
+            provider: enhancedOptions.provider,
+            model: enhancedOptions.model,
+            temperature: enhancedOptions.temperature,
+            maxTokens: enhancedOptions.maxTokens,
+            systemPrompt: enhancedOptions.systemPrompt,
+            timeout: enhancedOptions.timeout
+              ? enhancedOptions.timeout * 1000
+              : undefined,
+            disableTools: enhancedOptions.disableTools,
+            evaluationDomain: enhancedOptions.evaluationDomain as
+              | string
+              | undefined,
+            toolUsageContext: enhancedOptions.toolUsageContext as
+              | string
+              | undefined,
+            context: context,
+            factoryConfig: enhancedOptions.domain
               ? {
-                  domainType: options.domain as string,
+                  domainType: enhancedOptions.domain as string,
                   enhancementType: "domain-configuration",
                   validateDomainData: true,
                 }
@@ -1543,7 +2350,10 @@ export class CLICommandFactory {
       // Handle output with universal formatting
       this.handleOutput(results, options);
 
-      process.exit(0);
+      if (!globalSession.getCurrentSessionId()) {
+        await this.flushLangfuseTraces();
+        process.exit(0);
+      }
     } catch (error) {
       if (spinner) {
         spinner.fail();
@@ -1618,6 +2428,253 @@ export class CLICommandFactory {
   }
 
   /**
+   * Execute memory stats command
+   */
+  private static async executeMemoryStats(argv: BaseCommandArgs) {
+    const options = this.processOptions(argv);
+    const spinner = options.quiet
+      ? null
+      : ora("🧠 Getting memory stats...").start();
+
+    try {
+      const sdk = globalSession.getOrCreateNeuroLink();
+
+      // Handle dry-run mode
+      if (options.dryRun) {
+        const mockStats = {
+          totalSessions: 5,
+          totalTurns: 47,
+          memoryUsage: "Active",
+        };
+
+        if (spinner) {
+          spinner.succeed(chalk.green("✅ Memory stats retrieved (dry-run)"));
+        }
+
+        this.handleOutput(mockStats, options);
+        return;
+      }
+
+      const stats = await sdk.getConversationStats();
+
+      if (spinner) {
+        spinner.succeed(chalk.green("✅ Memory stats retrieved"));
+      }
+
+      if (options.format === "json") {
+        this.handleOutput(stats, options);
+      } else {
+        logger.always(chalk.blue("📊 Conversation Memory Stats:"));
+        logger.always(`   Total Sessions: ${stats.totalSessions}`);
+        logger.always(`   Total Turns: ${stats.totalTurns}`);
+        logger.always(
+          `   Memory Status: ${stats.totalSessions > 0 ? "Active" : "Empty"}`,
+        );
+      }
+    } catch (error) {
+      if (spinner) {
+        spinner.fail("Memory stats failed");
+      }
+
+      if ((error as Error).message.includes("not enabled")) {
+        logger.always(chalk.yellow("⚠️ Conversation memory is not enabled"));
+        logger.always(
+          "Enable it by using --enable-conversation-memory with loop mode",
+        );
+      } else {
+        handleError(error as Error, "Memory stats");
+      }
+    }
+  }
+
+  /**
+   * Execute memory history command
+   */
+  private static async executeMemoryHistory(
+    argv: BaseCommandArgs & { sessionId: string },
+  ) {
+    const options = this.processOptions(argv);
+    const spinner = options.quiet
+      ? null
+      : ora(`🧠 Getting history for ${argv.sessionId}...`).start();
+
+    try {
+      const sdk = globalSession.getOrCreateNeuroLink();
+
+      // Handle dry-run mode
+      if (options.dryRun) {
+        const mockHistory = [
+          { role: "user", content: "Hello, how are you?" },
+          {
+            role: "assistant",
+            content: "I'm doing well, thank you! How can I help you today?",
+          },
+          { role: "user", content: "Can you explain quantum computing?" },
+          {
+            role: "assistant",
+            content: "Quantum computing is a revolutionary technology...",
+          },
+        ];
+
+        if (spinner) {
+          spinner.succeed(
+            chalk.green(`✅ History retrieved for ${argv.sessionId} (dry-run)`),
+          );
+        }
+
+        this.handleOutput(mockHistory, options);
+        return;
+      }
+
+      const history = await sdk.getConversationHistory(argv.sessionId);
+
+      if (spinner) {
+        spinner.succeed(
+          chalk.green(`✅ History retrieved for ${argv.sessionId}`),
+        );
+      }
+
+      if (history.length === 0) {
+        logger.always(
+          chalk.yellow(
+            `⚠️ No conversation history found for session: ${argv.sessionId}`,
+          ),
+        );
+        return;
+      }
+
+      if (options.format === "json") {
+        this.handleOutput(history, options);
+      } else {
+        logger.always(
+          chalk.blue(`💬 Conversation History (${argv.sessionId}):`),
+        );
+        for (const message of history) {
+          const roleColor = message.role === "user" ? chalk.cyan : chalk.green;
+          const roleLabel = message.role === "user" ? "User" : "Assistant";
+          logger.always(`   [${roleColor(roleLabel)}]: ${message.content}`);
+        }
+      }
+    } catch (error) {
+      if (spinner) {
+        spinner.fail("Memory history failed");
+      }
+
+      if ((error as Error).message.includes("not enabled")) {
+        logger.always(chalk.yellow("⚠️ Conversation memory is not enabled"));
+        logger.always(
+          "Enable it by using --enable-conversation-memory with loop mode",
+        );
+      } else {
+        handleError(error as Error, "Memory history");
+      }
+    }
+  }
+
+  /**
+   * Execute memory clear command
+   */
+  private static async executeMemoryClear(
+    argv: BaseCommandArgs & { sessionId?: string },
+  ) {
+    const options = this.processOptions(argv);
+    const isAllSessions = !argv.sessionId;
+    const target = isAllSessions ? "all sessions" : `session ${argv.sessionId}`;
+    const spinner = options.quiet
+      ? null
+      : ora(`🧠 Clearing ${target}...`).start();
+
+    try {
+      const sdk = globalSession.getOrCreateNeuroLink();
+
+      // Handle dry-run mode
+      if (options.dryRun) {
+        if (spinner) {
+          spinner.succeed(
+            chalk.green(
+              `✅ ${isAllSessions ? "All sessions" : "Session"} cleared (dry-run)`,
+            ),
+          );
+        }
+
+        const result = {
+          success: true,
+          action: isAllSessions ? "clear_all" : "clear_session",
+          sessionId: argv.sessionId || null,
+          message: `${isAllSessions ? "All sessions" : "Session"} would be cleared`,
+        };
+
+        this.handleOutput(result, options);
+        return;
+      }
+
+      let success: boolean;
+      if (isAllSessions) {
+        await sdk.clearAllConversations();
+        success = true;
+      } else {
+        // sessionId is guaranteed to exist when isAllSessions is false
+        if (!argv.sessionId) {
+          throw new Error(
+            "Session ID is required for clearing specific session",
+          );
+        }
+        success = await sdk.clearConversationSession(argv.sessionId);
+      }
+
+      if (spinner) {
+        if (success) {
+          spinner.succeed(
+            chalk.green(
+              `✅ ${isAllSessions ? "All sessions" : "Session"} cleared successfully`,
+            ),
+          );
+        } else {
+          spinner.warn(
+            chalk.yellow(
+              `⚠️ Session ${argv.sessionId} not found or already empty`,
+            ),
+          );
+        }
+      }
+
+      if (options.format === "json") {
+        const result = {
+          success,
+          action: isAllSessions ? "clear_all" : "clear_session",
+          sessionId: argv.sessionId || null,
+        };
+        this.handleOutput(result, options);
+      } else if (!success && !isAllSessions) {
+        logger.always(
+          chalk.yellow(
+            `⚠️ Session ${argv.sessionId} not found or already empty`,
+          ),
+        );
+      } else if (!options.quiet) {
+        logger.always(
+          chalk.green(
+            `✅ ${isAllSessions ? "All conversation history" : `Session ${argv.sessionId}`} cleared`,
+          ),
+        );
+      }
+    } catch (error) {
+      if (spinner) {
+        spinner.fail("Memory clear failed");
+      }
+
+      if ((error as Error).message.includes("not enabled")) {
+        logger.always(chalk.yellow("⚠️ Conversation memory is not enabled"));
+        logger.always(
+          "Enable it by using --enable-conversation-memory with loop mode",
+        );
+      } else {
+        handleError(error as Error, "Memory clear");
+      }
+    }
+  }
+
+  /**
    * Execute completion command
    */
   private static async executeCompletion(
@@ -1641,7 +2698,7 @@ export class CLICommandFactory {
         '    prev="${COMP_WORDS[COMP_CWORD - 1]}"\n\n' +
         "    # Main commands\n" +
         "    if [[ ${COMP_CWORD} -eq 1 ]]; then\n" +
-        '        opts="generate gen stream batch provider status models mcp discover config get-best-provider completion"\n' +
+        '        opts="generate gen stream batch provider status models mcp discover memory config get-best-provider completion"\n' +
         '        COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )\n' +
         "        return 0\n" +
         "    fi\n\n" +
@@ -1703,6 +2760,12 @@ export class CLICommandFactory {
         "                return 0\n" +
         "            fi\n" +
         "            ;;\n" +
+        "        memory)\n" +
+        "            if [[ ${COMP_CWORD} -eq 2 ]]; then\n" +
+        '                COMPREPLY=( $(compgen -W "stats history clear" -- ${cur}) )\n' +
+        "                return 0\n" +
+        "            fi\n" +
+        "            ;;\n" +
         "        *)\n" +
         "            # Global options for all commands\n" +
         '            opts="--help --version --debug --quiet --noColor --configFile"\n' +
@@ -1761,6 +2824,22 @@ export class CLICommandFactory {
       }
     } catch (error) {
       handleError(error as Error, "Completion generation");
+    }
+  }
+
+  /**
+   * Flush Langfuse traces before exit
+   */
+  private static async flushLangfuseTraces(): Promise<void> {
+    try {
+      logger.debug("[CLI] Flushing Langfuse traces before exit...");
+      const { flushOpenTelemetry } = await import(
+        "../../lib/services/server/ai/observability/instrumentation.js"
+      );
+      await flushOpenTelemetry();
+      logger.debug("[CLI] Langfuse traces flushed successfully");
+    } catch (error) {
+      logger.error("[CLI] Error flushing Langfuse traces", { error });
     }
   }
 }

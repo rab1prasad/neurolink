@@ -18,6 +18,11 @@ export type UnknownRecord = Record<string, unknown>;
 export type UnknownArray = unknown[];
 
 /**
+ * Storage type for conversation memory factory
+ */
+export type StorageType = "memory" | "redis";
+
+/**
  * JSON-serializable value type
  */
 export type JsonValue =
@@ -28,37 +33,37 @@ export type JsonValue =
   | JsonObject
   | JsonArray;
 
-export interface JsonObject {
+export type JsonObject = {
   [key: string]: JsonValue;
-}
+};
 
-export interface JsonArray extends Array<JsonValue> {}
+export type JsonArray = JsonValue[];
 
 /**
  * Type-safe error handling
  */
-export interface ErrorInfo {
+export type ErrorInfo = {
   message: string;
   code?: string | number;
   stack?: string;
   cause?: unknown;
-}
+};
 
 /**
  * Generic success/error result type
  */
-export interface Result<T = unknown, E = ErrorInfo> {
+export type Result<T = unknown, E = ErrorInfo> = {
   success: boolean;
   data?: T;
   error?: E;
-}
+};
 
 /**
  * Function parameter type for dynamic functions
  */
-export interface FunctionParameters {
+export type FunctionParameters = {
   [key: string]: unknown;
-}
+};
 
 /**
  * Generic async function type
@@ -134,3 +139,92 @@ export function toErrorInfo(error: unknown): ErrorInfo {
     message: getErrorMessage(error),
   };
 }
+
+/**
+ * Stream event types for real-time communication
+ */
+export type StreamEvent = {
+  type: "stream:chunk" | "stream:complete" | "stream:error";
+  content?: string;
+  metadata?: JsonObject;
+  timestamp: number;
+};
+
+/**
+ * Enhanced NeuroLink event types
+ * Flexible type to support both typed and legacy event patterns
+ */
+export type NeuroLinkEvents = {
+  // Core tool events
+  "tool:start": unknown;
+  "tool:end": unknown;
+
+  // Stream events
+  "stream:start": unknown;
+  "stream:end": unknown;
+  "stream:chunk": unknown;
+  "stream:complete": unknown;
+  "stream:error": unknown;
+
+  // Generation events
+  "generation:start": unknown;
+  "generation:end": unknown;
+
+  // Response events
+  "response:start": unknown;
+  "response:end": unknown;
+
+  // External MCP events
+  "externalMCP:serverConnected": unknown;
+  "externalMCP:serverDisconnected": unknown;
+  "externalMCP:serverFailed": unknown;
+  "externalMCP:toolDiscovered": unknown;
+  "externalMCP:toolRemoved": unknown;
+  "externalMCP:serverAdded": unknown;
+  "externalMCP:serverRemoved": unknown;
+
+  // Tool registration events
+  "tools-register:start": unknown;
+  "tools-register:end": unknown;
+
+  // General events
+  connected: unknown;
+  message: unknown;
+  error: unknown;
+  log: unknown;
+
+  // Log events
+  "log-event": unknown;
+
+  // Allow any additional event for flexibility
+  [key: string]: unknown;
+};
+
+/**
+ * TypeScript utility for typed EventEmitter
+ * Flexible interface to support both typed and legacy event patterns
+ */
+export type TypedEventEmitter<TEvents extends Record<string, unknown>> = {
+  on<K extends keyof TEvents>(
+    event: K,
+    listener: (...args: unknown[]) => void,
+  ): TypedEventEmitter<TEvents>;
+  emit<K extends keyof TEvents>(event: K, ...args: unknown[]): boolean;
+  off<K extends keyof TEvents>(
+    event: K,
+    listener: (...args: unknown[]) => void,
+  ): TypedEventEmitter<TEvents>;
+  removeAllListeners<K extends keyof TEvents>(
+    event?: K,
+  ): TypedEventEmitter<TEvents>;
+  listenerCount<K extends keyof TEvents>(event: K): number;
+  listeners<K extends keyof TEvents>(
+    event: K,
+  ): Array<(...args: unknown[]) => void>;
+};
+
+export type Context = {
+  traceName?: string;
+  userId?: string;
+  sessionId?: string;
+};

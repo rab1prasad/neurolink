@@ -1,5 +1,7 @@
 # 📚 API Reference
 
+> **📌 Note**: This is a legacy API reference location. For the most up-to-date and comprehensive API documentation, please visit the **[📚 Complete SDK API Reference](../sdk/api-reference.md)**.
+
 Complete reference for NeuroLink's TypeScript API.
 
 ## Core Functions
@@ -1498,10 +1500,6 @@ FALLBACK_MODEL?: string                          // Model to use if preferred un
 // Provider preferences
 DEFAULT_PROVIDER?: 'auto' | 'openai' | 'bedrock' | 'sagemaker' | 'vertex' | 'anthropic' | 'azure' | 'google-ai' | 'huggingface' | 'ollama' | 'mistral' | 'litellm'
 FALLBACK_PROVIDER?: 'openai' | 'bedrock' | 'sagemaker' | 'vertex' | 'anthropic' | 'azure' | 'google-ai' | 'huggingface' | 'ollama' | 'mistral' | 'litellm'
-
-// Feature toggles
-ENABLE_STREAMING?: 'true' | 'false'
-ENABLE_FALLBACK?: 'true' | 'false'
 
 // Debugging
 NEUROLINK_DEBUG?: 'true' | 'false'

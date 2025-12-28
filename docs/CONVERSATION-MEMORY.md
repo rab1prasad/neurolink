@@ -361,9 +361,10 @@ const neurolink = new NeuroLink({
 
 ## 🔗 Related Documentation
 
-- [API Reference](./API-REFERENCE.md) - Complete SDK documentation
+- **[Redis Conversation Export](features/conversation-history.md)** - Export session history as JSON for analytics (Q4 2025)
+- [API Reference](sdk/api-reference.md) - Complete SDK documentation
 - [Configuration](./CONFIGURATION.md) - Environment setup guide
-- [Examples](./examples/) - More usage examples
+- [Examples](guides/examples/use-cases.md) - More usage examples
 - [Testing Guide](./TESTING.md) - How to test conversation memory
 
 ## 📈 Performance Characteristics

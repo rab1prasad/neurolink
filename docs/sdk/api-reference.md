@@ -220,6 +220,123 @@ All providers now include method aliases that match CLI command names for consis
 
 ## 🆕 NeuroLink Class API
 
+### Constructor: `new NeuroLink(config?)`
+
+Create a new NeuroLink instance with optional configuration for conversation memory, middleware, and orchestration.
+
+```typescript
+const neurolink = new NeuroLink(config?: NeuroLinkConstructorConfig)
+```
+
+**Parameters:**
+
+```typescript
+interface NeuroLinkConstructorConfig {
+  // Conversation Memory (Q4 2025)
+  conversationMemory?: {
+    enabled: boolean;
+    store?: "memory" | "redis"; // Default: 'memory'
+    redis?: {
+      host?: string;
+      port?: number;
+      password?: string;
+      ttl?: number; // Time-to-live in seconds
+    };
+    maxSessions?: number;
+    maxTurnsPerSession?: number;
+  };
+
+  // Middleware Configuration (Q4 2025)
+  middleware?: {
+    preset?: "default" | "security" | "all";
+    middlewareConfig?: {
+      guardrails?: {
+        enabled: boolean;
+        config?: {
+          badWords?: {
+            enabled: boolean;
+            list?: string[];
+          };
+          modelFilter?: {
+            enabled: boolean;
+            filterModel?: string;
+          };
+        };
+      };
+      analytics?: {
+        enabled: boolean;
+      };
+    };
+  };
+
+  // Provider Orchestration (Q3 2025)
+  enableOrchestration?: boolean;
+  orchestrationConfig?: {
+    fallbackChain?: string[]; // Provider fallback order
+    preferCheap?: boolean;
+  };
+}
+```
+
+**Examples:**
+
+```typescript
+import { NeuroLink } from "@juspay/neurolink";
+
+// Basic usage (no configuration)
+const neurolink = new NeuroLink();
+
+// With Redis conversation memory (Q4 2025)
+const neurolinkWithMemory = new NeuroLink({
+  conversationMemory: {
+    enabled: true,
+    store: "redis",
+    redis: {
+      host: "localhost",
+      port: 6379,
+      ttl: 7 * 24 * 60 * 60, // 7 days
+    },
+    maxTurnsPerSession: 100,
+  },
+});
+
+// With guardrails middleware (Q4 2025)
+const neurolinkWithGuardrails = new NeuroLink({
+  middleware: {
+    preset: "security", // Enables guardrails automatically
+    middlewareConfig: {
+      guardrails: {
+        enabled: true,
+        config: {
+          badWords: {
+            enabled: true,
+            list: ["profanity1", "profanity2"],
+          },
+        },
+      },
+    },
+  },
+});
+
+// Complete configuration with all Q4 features
+const neurolinkComplete = new NeuroLink({
+  conversationMemory: {
+    enabled: true,
+    store: "redis",
+  },
+  middleware: {
+    preset: "all", // Analytics + Guardrails
+  },
+  enableOrchestration: true,
+});
+```
+
+See also:
+
+- [Redis Conversation Export](../features/conversation-history.md)
+- [Guardrails Middleware](../features/guardrails.md)
+- [Provider Orchestration](../features/provider-orchestration.md)
+
 ### `addMCPServer(serverId, config)`
 
 **NEW!** Programmatically add MCP servers at runtime for dynamic tool ecosystem management.
@@ -303,6 +420,133 @@ Access the unified MCP registry for advanced server management.
 getUnifiedRegistry(): UnifiedMCPRegistry
 ```
 
+### `exportConversationHistory(options)` (Q4 2025)
+
+**NEW!** Export conversation session history from Redis storage as JSON or CSV for analytics, debugging, and compliance.
+
+```typescript
+async exportConversationHistory(options: ExportOptions): Promise<ConversationHistory>
+```
+
+**Parameters:**
+
+```typescript
+interface ExportOptions {
+  sessionId: string; // Session ID to export
+  format?: "json" | "csv"; // Default: 'json'
+  includeMetadata?: boolean; // Default: true
+  startTime?: Date; // Filter: export from this time
+  endTime?: Date; // Filter: export until this time
+}
+```
+
+**Returns:**
+
+```typescript
+interface ConversationHistory {
+  sessionId: string;
+  userId?: string;
+  createdAt: string;
+  updatedAt: string;
+  turns: Array<{
+    index: number;
+    role: "user" | "assistant";
+    content: string;
+    timestamp: string;
+    model?: string;
+    provider?: string;
+    tokens?: {
+      prompt: number;
+      completion: number;
+    };
+  }>;
+  metadata?: {
+    provider?: string;
+    model?: string;
+    totalTurns: number;
+    toolsUsed?: string[];
+  };
+}
+```
+
+**Examples:**
+
+```typescript
+import { NeuroLink } from "@juspay/neurolink";
+
+const neurolink = new NeuroLink({
+  conversationMemory: {
+    enabled: true,
+    store: "redis",
+  },
+});
+
+// Export session as JSON
+const history = await neurolink.exportConversationHistory({
+  sessionId: "session-abc123",
+  format: "json",
+  includeMetadata: true,
+});
+
+console.log(history.turns.length); // Number of conversation turns
+console.log(history.metadata); // Session metadata
+
+// Export with time filtering
+const recentHistory = await neurolink.exportConversationHistory({
+  sessionId: "session-abc123",
+  startTime: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
+  endTime: new Date(),
+});
+
+// Export as CSV for analytics
+const csvHistory = await neurolink.exportConversationHistory({
+  sessionId: "session-abc123",
+  format: "csv",
+});
+```
+
+**Note:** Requires `conversationMemory.store: 'redis'` configuration. In-memory storage does not support export.
+
+See also: [Redis Conversation Export Guide](../features/conversation-history.md)
+
+### `getActiveSessions()` (Q4 2025)
+
+**NEW!** Get list of all active conversation sessions stored in Redis.
+
+```typescript
+async getActiveSessions(): Promise<string[]>
+```
+
+**Returns:** Array of session IDs
+
+**Example:**
+
+```typescript
+const sessions = await neurolink.getActiveSessions();
+console.log(`Active sessions: ${sessions.length}`);
+
+// Export all sessions
+for (const sessionId of sessions) {
+  const history = await neurolink.exportConversationHistory({ sessionId });
+  await saveToDatabase(history);
+}
+```
+
+### `deleteConversationHistory(sessionId)` (Q4 2025)
+
+**NEW!** Delete a conversation session from Redis storage.
+
+```typescript
+async deleteConversationHistory(sessionId: string): Promise<void>
+```
+
+**Example:**
+
+```typescript
+// Clean up old session
+await neurolink.deleteConversationHistory("session-abc123");
+```
+
 These methods have identical signatures and behavior to `generate()`.
 
 ```typescript
@@ -324,56 +568,122 @@ async generate(options: GenerateOptions): Promise<GenerateResult>
 
 ```typescript
 interface GenerateOptions {
-  input: { text: string };
+  input: {
+    text: string;
+    images?: Array<string | Buffer>; // Local paths, URLs, or buffers
+    csvFiles?: Array<string | Buffer>; // CSV files (converted to text)
+    pdfFiles?: Array<string | Buffer>; // PDF files (native binary)
+    officeFiles?: Array<string | Buffer>; // Office documents (DOCX, PPTX, XLSX)
+    files?: Array<string | Buffer>; // Auto-detect file types
+    content?: Array<TextContent | ImageContent>; // Advanced multimodal payloads
+  };
+  provider?: AIProviderName | string; // Leave undefined to allow orchestration/fallback
+  model?: string; // Model slug (e.g., 'gemini-2.5-pro')
+  region?: string; // Regional routing for providers that support it
   temperature?: number;
   maxTokens?: number;
   systemPrompt?: string;
-  schema?: any; // For structured output
-  timeout?: number | string; // Timeout in ms or human-readable format (e.g., '30s', '2m', '1h')
-  disableTools?: boolean; // Disable tool usage for this request
-  enableAnalytics?: boolean; // Enable usage analytics
-  enableEvaluation?: boolean; // Enable AI quality scoring
-  context?: Record<string, any>; // Custom context for analytics
+  schema?: ValidationSchema; // Structured output schema
+  tools?: Record<string, Tool>; // Optional tool overrides
+  timeout?: number | string; // 120 (seconds) or '2m', '1h'
+  disableTools?: boolean;
+  enableAnalytics?: boolean;
+  enableEvaluation?: boolean;
+  evaluationDomain?: string;
+  toolUsageContext?: string;
+  context?: Record<string, JsonValue>;
+  conversationHistory?: Array<{ role: string; content: string }>;
+
+  // Document processing options
+  officeOptions?: OfficeProcessorOptions;
 }
 ```
+
+### Schema Limitations by Provider
+
+**Google Gemini Limitation (Vertex AI & Google AI Studio):**
+
+- ❌ Cannot combine `schema` + `tools` (including built-in tools)
+- ✅ Solution: Use `disableTools: true` when using schemas
+- 🔄 Industry Standard: All frameworks use this approach
+- 📅 Future: Gemini 3 Pro Preview (Nov 2025) supports both
+
+**Example:**
+
+```typescript
+// ❌ Will fail with Google providers
+const result = await neurolink.generate({
+  schema: MySchema,
+  provider: "vertex", // Error: Function calling with JSON mime type unsupported
+});
+
+// ✅ Correct for Google providers
+const result = await neurolink.generate({
+  schema: MySchema,
+  provider: "vertex",
+  disableTools: true, // Required
+});
+
+// ✅ Works without disableTools
+const result = await neurolink.generate({
+  schema: MySchema,
+  provider: "openai", // OpenAI supports both
+});
+```
+
+**Provider Support Matrix:**
+
+| Provider           | Tools + Schema              | Notes                 |
+| ------------------ | --------------------------- | --------------------- |
+| OpenAI             | ✅ Full Support             | No limitations        |
+| Anthropic          | ✅ Full Support             | No limitations        |
+| Vertex AI (Gemini) | ❌ Use `disableTools: true` | Google API limitation |
+| Google AI Studio   | ❌ Use `disableTools: true` | Google API limitation |
+| Vertex AI (Claude) | ✅ Full Support             | Uses Anthropic models |
+| Azure OpenAI       | ✅ Full Support             | No limitations        |
+| Bedrock            | ✅ Full Support             | No limitations        |
 
 **Returns:**
 
 ```typescript
 interface GenerateResult {
   content: string;
-  provider: string;
-  model: string;
+  provider?: string;
+  model?: string;
   usage?: {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
   };
   responseTime?: number;
+  toolCalls?: Array<{
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+  }>;
+  toolResults?: unknown[];
+  toolsUsed?: string[];
 
-  // 🆕 NEW: AI Enhancement Features
   analytics?: {
     provider: string;
-    model: string;
-    tokens: { input: number; output: number; total: number };
+    model?: string;
+    tokenUsage: { input: number; output: number; total: number };
     cost?: number;
-    responseTime: number;
-    context?: Record<string, any>;
+    requestDuration?: number;
+    context?: Record<string, JsonValue>;
   };
 
   evaluation?: {
-    relevanceScore: number; // 1-10 scale
-    accuracyScore: number; // 1-10 scale
-    completenessScore: number; // 1-10 scale
-    overallScore: number; // 1-10 scale
-    alertLevel?: string; // 'none', 'low', 'medium', 'high'
-    reasoning?: string; // AI reasoning for the evaluation
-
-    // Enhanced evaluation fields (when available)
-    domainAlignment?: number; // 1-10 scale
-    terminologyAccuracy?: number; // 1-10 scale
-    toolEffectiveness?: number; // 1-10 scale
-    alertSeverity?: string; // Legacy field
+    relevanceScore: number;
+    accuracyScore: number;
+    completenessScore: number;
+    overallScore: number;
+    alertLevel?: "none" | "low" | "medium" | "high";
+    reasoning?: string;
+    suggestedImprovements?: string;
+    domainAlignment?: number;
+    terminologyAccuracy?: number;
+    toolEffectiveness?: number;
     contextUtilization?: {
       conversationUsed: boolean;
       toolsUsed: boolean;
@@ -699,18 +1009,28 @@ The base `GenerateOptions` interface now supports enterprise features:
 
 ```typescript
 interface GenerateOptions {
-  input: { text: string };
+  input: {
+    text: string;
+    images?: Array<string | Buffer>;
+    content?: Array<TextContent | ImageContent>;
+  };
+  provider?: AIProviderName | string;
+  model?: string;
+  region?: string;
   temperature?: number;
   maxTokens?: number;
   systemPrompt?: string;
-  schema?: any;
+  schema?: ValidationSchema;
+  tools?: Record<string, Tool>;
   timeout?: number | string;
-  disableTools?: boolean; // Disable tool usage for this request
+  disableTools?: boolean;
 
-  // 🆕 NEW: AI Enhancement Features
-  enableAnalytics?: boolean; // Enable usage analytics
-  enableEvaluation?: boolean; // Enable AI quality scoring
-  context?: Record<string, any>; // Custom context for analytics
+  // Enhancements
+  enableAnalytics?: boolean;
+  enableEvaluation?: boolean;
+  evaluationDomain?: string;
+  toolUsageContext?: string;
+  context?: Record<string, JsonValue>;
 }
 ```
 
@@ -1456,7 +1776,6 @@ DEFAULT_PROVIDER?: 'auto' | 'openai' | 'bedrock' | 'vertex' | 'anthropic' | 'azu
 FALLBACK_PROVIDER?: 'openai' | 'bedrock' | 'vertex' | 'anthropic' | 'azure' | 'google-ai' | 'huggingface' | 'ollama' | 'mistral' | 'litellm'
 
 // Feature toggles
-ENABLE_STREAMING?: 'true' | 'false'
 ENABLE_FALLBACK?: 'true' | 'false'
 
 // Debugging
@@ -1594,6 +1913,115 @@ interface DynamicModelRegistry {
   getAllModels(): Promise<ModelConfig[]>;
 }
 ```
+
+### Office Document Types
+
+Types for processing Office documents (DOCX, PPTX, XLSX):
+
+```typescript
+/**
+ * Supported Office document types
+ */
+type OfficeFileType = "docx" | "pptx" | "xlsx" | "doc" | "xls";
+
+/**
+ * Extended file type including Office formats
+ */
+type FileType = "csv" | "image" | "pdf" | "office" | "text" | "unknown";
+
+/**
+ * Office processor options
+ */
+interface OfficeProcessorOptions {
+  /** Provider to use for document processing */
+  provider?: string;
+
+  /** Maximum file size in MB (default: 5) */
+  maxSizeMB?: number;
+
+  /** Whether to extract embedded images */
+  extractImages?: boolean;
+
+  /** Whether to preserve document structure in output */
+  preserveStructure?: boolean;
+}
+
+/**
+ * Office processing result
+ */
+interface OfficeProcessingResult {
+  type: "office";
+  content: Buffer;
+  mimeType: string;
+  metadata: {
+    confidence: number;
+    size: number;
+    filename?: string;
+    format: OfficeFileType;
+    provider: string;
+    estimatedPages?: number;
+    hasEmbeddedImages?: boolean;
+    hasCharts?: boolean;
+  };
+}
+
+/**
+ * Office provider configuration
+ */
+interface OfficeProviderConfig {
+  maxSizeMB: number;
+  supportedFormats: OfficeFileType[];
+  supportsNative: boolean;
+  apiType: "document" | "converse" | "unsupported";
+}
+```
+
+**Office Document Provider Support:**
+
+| Provider             | DOCX | PPTX | XLSX | DOC | XLS | Notes                                |
+| -------------------- | ---- | ---- | ---- | --- | --- | ------------------------------------ |
+| **AWS Bedrock**      | ✅   | ✅   | ✅   | ✅  | ✅  | Full native support via Converse API |
+| **Google Vertex AI** | ✅   | ⚠️   | ✅   | ⚠️  | ⚠️  | Best for DOCX and XLSX               |
+| **Anthropic Claude** | ✅   | ⚠️   | ✅   | ⚠️  | ⚠️  | Via document API                     |
+| **OpenAI**           | ❌   | ❌   | ❌   | ❌  | ❌  | Not supported                        |
+| **Azure OpenAI**     | ❌   | ❌   | ❌   | ❌  | ❌  | Not supported                        |
+
+**Example Usage:**
+
+```typescript
+import { NeuroLink } from "@juspay/neurolink";
+
+const neurolink = new NeuroLink();
+
+// Analyze Word document
+const result = await neurolink.generate({
+  input: {
+    text: "Summarize this document",
+    officeFiles: ["report.docx"],
+  },
+  provider: "bedrock",
+});
+
+// Analyze Excel spreadsheet
+const data = await neurolink.generate({
+  input: {
+    text: "What are the top products by revenue?",
+    officeFiles: ["sales-data.xlsx"],
+  },
+  provider: "bedrock",
+});
+
+// Mixed file types with auto-detection
+const analysis = await neurolink.generate({
+  input: {
+    text: "Compare all documents",
+    files: ["report.docx", "data.xlsx", "chart.png", "notes.pdf"],
+  },
+  provider: "bedrock",
+});
+```
+
+See also: [Office Documents Guide](../features/office-documents.md)
 
 ### Provider Tool Support Status
 
@@ -2515,6 +2943,36 @@ neurolink mcp test filesystem
   }
 }
 ```
+
+---
+
+## Related Features
+
+**Q4 2025:**
+
+- [Human-in-the-Loop (HITL)](../features/hitl.md) – Mark tools with `requiresConfirmation: true`
+- [Guardrails Middleware](../features/guardrails.md) – Enable with `middleware: { preset: 'security' }`
+- [Redis Conversation Export](../features/conversation-history.md) – Use `exportConversationHistory()` method
+
+**Q3 2025:**
+
+- [Multimodal Chat](../features/multimodal-chat.md) – Use `images` array in `generate()` options
+- [Auto Evaluation](../features/auto-evaluation.md) – Enable with `enableEvaluation: true`
+- [CLI Loop Sessions](../features/cli-loop-sessions.md) – Interactive mode with persistent state
+- [Provider Orchestration](../features/provider-orchestration.md) – Set `enableOrchestration: true`
+- [Regional Streaming](../features/regional-streaming.md) – Use `region` parameter in `generate()`
+
+**Document Processing:**
+
+- [Office Documents](../features/office-documents.md) – Use `officeFiles` array for DOCX, PPTX, XLSX
+- [PDF Support](../features/pdf-support.md) – Use `pdfFiles` array for PDF documents
+- [CSV Support](../features/csv-support.md) – Use `csvFiles` array for spreadsheet data
+
+**Documentation:**
+
+- [CLI Commands Reference](../cli/commands.md) – CLI equivalents for all SDK methods
+- [Configuration Guide](../CONFIGURATION.md) – Environment variables and config files
+- [Troubleshooting](../TROUBLESHOOTING.md) – Common SDK issues and solutions
 
 ---
 

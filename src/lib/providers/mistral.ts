@@ -1,7 +1,7 @@
 import { createMistral } from "@ai-sdk/mistral";
 import { streamText, type LanguageModelV1 } from "ai";
 import type { ValidationSchema } from "../types/typeAliases.js";
-import type { AIProviderName } from "../types/index.js";
+import { AIProviderName } from "../constants/enums.js";
 import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
 import type { UnknownRecord } from "../types/common.js";
 import type { NeuroLink } from "../neurolink.js";
@@ -15,7 +15,6 @@ import {
   getProviderModel,
 } from "../utils/providerConfig.js";
 import { streamAnalyticsCollector } from "../core/streamAnalytics.js";
-import { buildMessagesArray } from "../utils/messageBuilder.js";
 import { createProxyFetch } from "../proxy/proxyFetch.js";
 
 // Configuration helpers - now using consolidated utility
@@ -24,7 +23,8 @@ const getMistralApiKey = (): string => {
 };
 
 const getDefaultMistralModel = (): string => {
-  return getProviderModel("MISTRAL_MODEL", "mistral-large-latest");
+  // Default to vision-capable Mistral Small 2506 (June 2025) with multimodal support
+  return getProviderModel("MISTRAL_MODEL", "mistral-small-2506");
 };
 
 /**
@@ -81,9 +81,14 @@ export class MistralProvider extends BaseProvider {
       // Get tools consistently with generate method
       const shouldUseTools = !options.disableTools && this.supportsTools();
       const tools = shouldUseTools ? await this.getAllTools() : {};
-      const messages = buildMessagesArray(options);
+
+      // Build message array from options with multimodal support
+      // Using protected helper from BaseProvider to eliminate code duplication
+      const messages = await this.buildMessagesForStream(options);
+
+      const model = await this.getAISDKModelWithMiddleware(options); // This is where network connection happens!
       const result = await streamText({
-        model: this.model,
+        model,
         messages: messages,
         temperature: options.temperature,
         maxTokens: options.maxTokens, // No default limit - unlimited unless specified
@@ -91,6 +96,19 @@ export class MistralProvider extends BaseProvider {
         maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
         toolChoice: shouldUseTools ? "auto" : "none",
         abortSignal: timeoutController?.controller.signal,
+        onStepFinish: ({ toolCalls, toolResults }) => {
+          this.handleToolExecutionStorage(
+            toolCalls,
+            toolResults,
+            options,
+            new Date(),
+          ).catch((error: unknown) => {
+            logger.warn("[MistralProvider] Failed to store tool executions", {
+              provider: this.providerName,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+        },
       });
 
       timeoutController?.cleanup();

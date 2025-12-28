@@ -3,6 +3,14 @@
  */
 
 import type { UnknownRecord, JsonValue } from "./common.js";
+import {
+  AIProviderName,
+  AnthropicModels,
+  BedrockModels,
+  GoogleAIModels,
+  OpenAIModels,
+  VertexModels,
+} from "../constants/enums.js";
 import type { Tool } from "ai";
 import type { ValidationSchema } from "./typeAliases.js";
 import type {
@@ -13,6 +21,10 @@ import type {
 import type { StreamOptions, StreamResult } from "./streamTypes.js";
 import type { ExternalMCPToolInfo } from "./externalMcp.js";
 
+// ============================================================================
+// TYPE ALIASES
+// ============================================================================
+
 /**
  * Generic AI SDK model interface
  */
@@ -20,108 +32,6 @@ export type AISDKModel = {
   // This will be refined based on actual AI SDK types
   [key: string]: unknown;
 };
-
-/**
- * Supported AI Provider Names
- */
-export enum AIProviderName {
-  BEDROCK = "bedrock",
-  OPENAI = "openai",
-  OPENAI_COMPATIBLE = "openai-compatible",
-  VERTEX = "vertex",
-  ANTHROPIC = "anthropic",
-  AZURE = "azure",
-  GOOGLE_AI = "google-ai",
-  HUGGINGFACE = "huggingface",
-  OLLAMA = "ollama",
-  MISTRAL = "mistral",
-  LITELLM = "litellm",
-  SAGEMAKER = "sagemaker",
-  AUTO = "auto",
-}
-
-/**
- * Supported Models for Amazon Bedrock
- */
-export enum BedrockModels {
-  CLAUDE_3_SONNET = "anthropic.claude-3-sonnet-20240229-v1:0",
-  CLAUDE_3_HAIKU = "anthropic.claude-3-haiku-20240307-v1:0",
-  CLAUDE_3_5_SONNET = "anthropic.claude-3-5-sonnet-20240620-v1:0",
-  CLAUDE_3_7_SONNET = "arn:aws:bedrock:us-east-2:225681119357:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-}
-
-/**
- * Supported Models for OpenAI
- */
-export enum OpenAIModels {
-  GPT_4 = "gpt-4",
-  GPT_4_TURBO = "gpt-4-turbo",
-  GPT_4O = "gpt-4o",
-  GPT_4O_MINI = "gpt-4o-mini",
-  GPT_3_5_TURBO = "gpt-3.5-turbo",
-}
-
-/**
- * Supported Models for Google Vertex AI
- */
-export enum VertexModels {
-  // Claude 4 Series (Latest - May 2025)
-  CLAUDE_4_0_SONNET = "claude-sonnet-4@20250514",
-  CLAUDE_4_0_OPUS = "claude-opus-4@20250514",
-
-  // Claude 3.5 Series (Still supported)
-  CLAUDE_3_5_SONNET = "claude-3-5-sonnet-20241022",
-  CLAUDE_3_5_HAIKU = "claude-3-5-haiku-20241022",
-
-  // Claude 3 Series (Legacy support)
-  CLAUDE_3_SONNET = "claude-3-sonnet-20240229",
-  CLAUDE_3_OPUS = "claude-3-opus-20240229",
-  CLAUDE_3_HAIKU = "claude-3-haiku-20240307",
-
-  // Gemini 2.5 Series (Latest - 2025)
-  GEMINI_2_5_PRO = "gemini-2.5-pro",
-  GEMINI_2_5_FLASH = "gemini-2.5-flash",
-  GEMINI_2_5_FLASH_LITE = "gemini-2.5-flash-lite",
-
-  // Gemini 2.0 Series
-  GEMINI_2_0_FLASH_001 = "gemini-2.0-flash-001",
-
-  // Gemini 1.5 Series (Legacy support)
-  GEMINI_1_5_PRO = "gemini-1.5-pro",
-  GEMINI_1_5_FLASH = "gemini-1.5-flash",
-}
-
-/**
- * Supported Models for Google AI Studio
- */
-export enum GoogleAIModels {
-  // Gemini 2.5 Series (Latest - 2025)
-  GEMINI_2_5_PRO = "gemini-2.5-pro",
-  GEMINI_2_5_FLASH = "gemini-2.5-flash",
-  GEMINI_2_5_FLASH_LITE = "gemini-2.5-flash-lite",
-
-  // Gemini 2.0 Series
-  GEMINI_2_0_FLASH_001 = "gemini-2.0-flash-001",
-
-  // Gemini 1.5 Series (Legacy support)
-  GEMINI_1_5_PRO = "gemini-1.5-pro",
-  GEMINI_1_5_FLASH = "gemini-1.5-flash",
-  GEMINI_1_5_FLASH_LITE = "gemini-1.5-flash-lite",
-}
-
-/**
- * Supported Models for Anthropic (Direct API)
- */
-export enum AnthropicModels {
-  // Claude 3.5 Series (Latest)
-  CLAUDE_3_5_SONNET = "claude-3-5-sonnet-20241022",
-  CLAUDE_3_5_HAIKU = "claude-3-5-haiku-20241022",
-
-  // Claude 3 Series (Legacy support)
-  CLAUDE_3_SONNET = "claude-3-sonnet-20240229",
-  CLAUDE_3_OPUS = "claude-3-opus-20240229",
-  CLAUDE_3_HAIKU = "claude-3-haiku-20240307",
-}
 
 /**
  * Union type of all supported model names
@@ -136,7 +46,20 @@ export type SupportedModelName =
 /**
  * Extract provider names from enum
  */
-export type ProviderName = keyof typeof AIProviderName;
+export type ProviderName = (typeof AIProviderName)[keyof typeof AIProviderName];
+
+/**
+ * Provider status information
+ */
+export type ProviderStatus = {
+  provider: string;
+  status: "working" | "failed" | "not-configured";
+  configured: boolean;
+  authenticated: boolean;
+  error?: string;
+  responseTime?: number;
+  model?: string;
+};
 
 /**
  * Provider error information
@@ -334,7 +257,7 @@ export type ProviderCapabilities = {
 /**
  * Provider configuration specifying provider and its available models (from core types)
  */
-export type ProviderConfig = {
+export type AIModelProviderConfig = {
   provider: AIProviderName;
   models: SupportedModelName[];
 };
@@ -352,7 +275,23 @@ export type IndividualProviderConfig = {
 };
 
 /**
- * AI Provider interface with flexible parameter support (converted from interface)
+ * Configuration options for provider validation
+ */
+export type ProviderConfigOptions = {
+  providerName: string;
+  envVarName: string;
+  setupUrl: string;
+  description: string;
+  instructions: string[];
+  fallbackEnvVars?: string[]; // For providers with multiple possible env vars
+};
+
+// ============================================================================
+// CORE PROVIDER INTERFACES
+// ============================================================================
+
+/**
+ * AI Provider type with flexible parameter support
  */
 export type AIProvider = {
   // Primary streaming method
@@ -401,6 +340,874 @@ export type ProviderCreationError = {
   provider: string;
   details?: Record<string, unknown>;
 };
+
+/**
+ * Provider factory function type
+ */
+export type ProviderFactory = (
+  modelName?: string,
+  providerName?: string,
+  sdk?: unknown,
+) => Promise<unknown>;
+
+/**
+ * Provider constructor type
+ */
+export type ProviderConstructor = {
+  new (modelName?: string, providerName?: string, sdk?: unknown): unknown;
+};
+
+/**
+ * Provider registration entry
+ */
+export type ProviderRegistration = {
+  name: string;
+  constructor: ProviderConstructor | ProviderFactory;
+  capabilities?: ProviderCapabilities;
+  defaultConfig?: IndividualProviderConfig;
+};
+
+/**
+ * Configuration options for the provider registry
+ */
+export type ProviderRegistryOptions = {
+  /**
+   * Enable loading of manual MCP configurations from .mcp-config.json
+   * Should only be true for CLI mode, false for SDK mode
+   */
+  enableManualMCP?: boolean;
+};
+
+/**
+ * Provider metadata type
+ */
+export type ProviderMetadata = {
+  name: string;
+  version: string;
+  capabilities: ProviderCapability[];
+  models: string[];
+  healthStatus: ProviderHealthStatus;
+};
+
+/**
+ * Provider capability type
+ */
+export type ProviderCapability =
+  | "text-generation"
+  | "streaming"
+  | "tool-calling"
+  | "image-generation"
+  | "embeddings";
+
+/**
+ * Extended tool type that combines AI SDK tools with external MCP tool info
+ */
+export type ExtendedTool = Tool & Partial<ExternalMCPToolInfo>;
+
+/**
+ * AI SDK generate result with steps support (extends GenerateResult)
+ */
+export type AISDKGenerateResult = GenerateResult & {
+  steps?: Array<{
+    toolCalls?: Array<{
+      toolName?: string;
+      name?: string;
+      [key: string]: unknown;
+    }>;
+    [key: string]: unknown;
+  }>;
+  [key: string]: unknown;
+};
+
+// ============================================================================
+// Provider-Specific Type Definitions
+// ============================================================================
+
+// ============================================================================
+// Amazon Bedrock Provider Types
+// ============================================================================
+
+/**
+ * Bedrock tool usage structure
+ */
+export type BedrockToolUse = {
+  toolUseId: string;
+  name: string;
+  input: Record<string, unknown>;
+};
+
+/**
+ * Bedrock tool result structure
+ */
+export type BedrockToolResult = {
+  toolUseId: string;
+  content: Array<{ text: string }>;
+  status: string;
+};
+
+/**
+ * Bedrock content block structure
+ */
+export type BedrockContentBlock = {
+  text?: string;
+  image?: {
+    format: "png" | "jpeg" | "gif" | "webp";
+    source: {
+      bytes?: Uint8Array | Buffer;
+    };
+  };
+  document?: {
+    format:
+      | "pdf"
+      | "csv"
+      | "doc"
+      | "docx"
+      | "xls"
+      | "xlsx"
+      | "html"
+      | "txt"
+      | "md";
+    name: string;
+    source: {
+      bytes?: Uint8Array | Buffer;
+    };
+  };
+  toolUse?: BedrockToolUse;
+  toolResult?: BedrockToolResult;
+};
+
+/**
+ * Bedrock message structure
+ */
+export type BedrockMessage = {
+  role: "user" | "assistant";
+  content: BedrockContentBlock[];
+};
+
+// ============================================================================
+// Google AI Studio Provider Types (Live API)
+// ============================================================================
+
+/**
+ * Google AI Live media configuration
+ */
+export type GenAILiveMedia = {
+  data: string;
+  mimeType: string;
+};
+
+/**
+ * Live server message inline data
+ */
+export type LiveServerMessagePartInlineData = {
+  data?: string;
+};
+
+/**
+ * Live server message model turn
+ */
+export type LiveServerMessageModelTurn = {
+  parts?: Array<{ inlineData?: LiveServerMessagePartInlineData }>;
+};
+
+/**
+ * Live server content structure
+ */
+export type LiveServerContent = {
+  modelTurn?: LiveServerMessageModelTurn;
+  interrupted?: boolean;
+};
+
+/**
+ * Live server message structure
+ */
+export type LiveServerMessage = {
+  serverContent?: LiveServerContent;
+};
+
+/**
+ * Live connection callbacks
+ */
+export type LiveConnectCallbacks = {
+  onopen?: () => void;
+  onmessage?: (message: LiveServerMessage) => void;
+  onerror?: (e: { message?: string }) => void;
+  onclose?: (e: { code?: number; reason?: string }) => void;
+};
+
+/**
+ * Live connection configuration
+ */
+export type LiveConnectConfig = {
+  model: string;
+  callbacks: LiveConnectCallbacks;
+  config: {
+    responseModalities: string[];
+    speechConfig: {
+      voiceConfig: { prebuiltVoiceConfig: { voiceName: string } };
+    };
+  };
+};
+
+/**
+ * Google AI Live session interface
+ */
+export type GenAILiveSession = {
+  sendRealtimeInput?: (payload: {
+    media?: GenAILiveMedia;
+    event?: string;
+  }) => Promise<void> | void;
+  sendInput?: (payload: {
+    event?: string;
+    media?: GenAILiveMedia;
+  }) => Promise<void> | void;
+  close?: (code?: number, reason?: string) => Promise<void> | void;
+};
+
+/**
+ * Google AI client interface
+ */
+export type GenAIClient = {
+  live: { connect: (config: LiveConnectConfig) => Promise<GenAILiveSession> };
+};
+
+/**
+ * Google GenAI constructor type
+ */
+export type GoogleGenAIClass = new (cfg: { apiKey: string }) => GenAIClient;
+
+// ============================================================================
+// OpenAI Compatible Provider Types
+// ============================================================================
+
+/**
+ * OpenAI-compatible models endpoint response structure
+ */
+export type ModelsResponse = {
+  data: Array<{
+    id: string;
+    object: string;
+    created?: number;
+    owned_by?: string;
+  }>;
+};
+
+// ============================================================================
+// Ollama Provider Types
+// ============================================================================
+
+/**
+ * Ollama tool call structure
+ */
+export type OllamaToolCall = {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+};
+
+/**
+ * Ollama tool result structure
+ */
+export type OllamaToolResult = {
+  tool_call_id: string;
+  content: string;
+};
+
+/**
+ * Ollama message structure for conversation and tool execution
+ */
+export type OllamaMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content:
+    | string
+    | Array<{ type: string; text?: string; [key: string]: unknown }>;
+  tool_calls?: OllamaToolCall[];
+  images?: string[];
+};
+
+/**
+ * Default model aliases for easy reference
+ */
+export const DEFAULT_MODEL_ALIASES = {
+  // Latest recommended models per provider
+  LATEST_OPENAI: OpenAIModels.GPT_4O,
+  FASTEST_OPENAI: OpenAIModels.GPT_4O_MINI,
+  LATEST_ANTHROPIC: AnthropicModels.CLAUDE_3_5_SONNET,
+  FASTEST_ANTHROPIC: AnthropicModels.CLAUDE_3_5_HAIKU,
+  LATEST_GOOGLE: GoogleAIModels.GEMINI_2_5_PRO,
+  FASTEST_GOOGLE: GoogleAIModels.GEMINI_2_5_FLASH,
+
+  // Best models by use case
+  BEST_CODING: AnthropicModels.CLAUDE_3_5_SONNET,
+  BEST_ANALYSIS: GoogleAIModels.GEMINI_2_5_PRO,
+  BEST_CREATIVE: AnthropicModels.CLAUDE_3_5_SONNET,
+  BEST_VALUE: GoogleAIModels.GEMINI_2_5_FLASH,
+} as const;
+
+/**
+ * @deprecated Use DEFAULT_MODEL_ALIASES instead. Will be removed in future version.
+ */
+export const ModelAliases = DEFAULT_MODEL_ALIASES;
+
+/**
+ * Default provider configurations
+ */
+export const DEFAULT_PROVIDER_CONFIGS: AIModelProviderConfig[] = [
+  {
+    provider: AIProviderName.BEDROCK,
+    models: [BedrockModels.CLAUDE_3_7_SONNET, BedrockModels.CLAUDE_3_5_SONNET],
+  },
+  {
+    provider: AIProviderName.VERTEX,
+    models: [VertexModels.CLAUDE_4_0_SONNET, VertexModels.GEMINI_2_5_FLASH],
+  },
+  {
+    provider: AIProviderName.OPENAI,
+    models: [OpenAIModels.GPT_4O, OpenAIModels.GPT_4O_MINI],
+  },
+];
+
+// ============================================================================
+// Amazon SageMaker Provider Types
+// ============================================================================
+
+/**
+ * Adaptive semaphore configuration for concurrency management
+ */
+export type AdaptiveSemaphoreConfig = {
+  initialConcurrency: number;
+  maxConcurrency: number;
+  minConcurrency: number;
+};
+
+/**
+ * Metrics for adaptive semaphore performance tracking
+ */
+export type AdaptiveSemaphoreMetrics = {
+  activeRequests: number;
+  currentConcurrency: number;
+  completedCount: number;
+  errorCount: number;
+  averageResponseTime: number;
+  waitingCount: number;
+};
+
+/**
+ * AWS configuration options for SageMaker client
+ */
+export type SageMakerConfig = {
+  /** AWS region for SageMaker service */
+  region: string;
+  /** AWS access key ID */
+  accessKeyId: string;
+  /** AWS secret access key */
+  secretAccessKey: string;
+  /** AWS session token (optional, for temporary credentials) */
+  sessionToken?: string;
+  /** Request timeout in milliseconds */
+  timeout?: number;
+  /** Maximum number of retry attempts */
+  maxRetries?: number;
+  /** Custom SageMaker endpoint URL (optional) */
+  endpoint?: string;
+};
+
+/**
+ * Model-specific configuration for SageMaker endpoints
+ */
+export type SageMakerModelConfig = {
+  /** SageMaker endpoint name */
+  endpointName: string;
+  /** Model type for request/response formatting */
+  modelType?:
+    | "llama"
+    | "mistral"
+    | "claude"
+    | "huggingface"
+    | "jumpstart"
+    | "custom";
+  /** Content type for requests */
+  contentType?: string;
+  /** Accept header for responses */
+  accept?: string;
+  /** Custom attributes for the endpoint */
+  customAttributes?: string;
+  /** Input format specification */
+  inputFormat?: "huggingface" | "jumpstart" | "custom";
+  /** Output format specification */
+  outputFormat?: "huggingface" | "jumpstart" | "custom";
+  /** Maximum tokens for generation */
+  maxTokens?: number;
+  /** Temperature parameter */
+  temperature?: number;
+  /** Top-p parameter */
+  topP?: number;
+  /** Stop sequences */
+  stopSequences?: string[];
+  /** Initial concurrency for batch processing */
+  initialConcurrency?: number;
+  /** Maximum concurrency for batch processing */
+  maxConcurrency?: number;
+  /** Minimum concurrency for batch processing */
+  minConcurrency?: number;
+  /** Maximum concurrent detection tests */
+  maxConcurrentDetectionTests?: number;
+};
+
+/**
+ * SageMaker endpoint information and metadata
+ */
+export type SageMakerEndpointInfo = {
+  /** Endpoint name */
+  endpointName: string;
+  /** Endpoint ARN */
+  endpointArn: string;
+  /** Associated model name */
+  modelName: string;
+  /** EC2 instance type */
+  instanceType: string;
+  /** Endpoint creation timestamp */
+  creationTime: string; // ISO 8601 date string
+  /** Last modification timestamp */
+  lastModifiedTime: string; // ISO 8601 date string
+  /** Current endpoint status */
+  endpointStatus:
+    | "InService"
+    | "Creating"
+    | "Updating"
+    | "SystemUpdating"
+    | "RollingBack"
+    | "Deleting"
+    | "Failed";
+  /** Current instance count */
+  currentInstanceCount?: number;
+  /** Variant weights for A/B testing */
+  productionVariants?: Array<{
+    variantName: string;
+    modelName: string;
+    initialInstanceCount: number;
+    instanceType: string;
+    currentWeight?: number;
+  }>;
+};
+
+/**
+ * Token usage and billing information
+ */
+export type SageMakerUsage = {
+  /** Number of prompt tokens */
+  promptTokens: number;
+  /** Number of completion tokens */
+  completionTokens: number;
+  /** Total tokens used */
+  total: number;
+  /** Request processing time in milliseconds */
+  requestTime?: number;
+  /** Model inference time in milliseconds */
+  inferenceTime?: number;
+  /** Estimated cost in USD */
+  estimatedCost?: number;
+};
+
+/**
+ * Parameters for SageMaker endpoint invocation
+ */
+export type InvokeEndpointParams = {
+  /** Endpoint name to invoke */
+  EndpointName: string;
+  /** Request body as string or Uint8Array */
+  Body: string | Uint8Array;
+  /** Content type of the request */
+  ContentType?: string;
+  /** Accept header for response format */
+  Accept?: string;
+  /** Custom attributes for the request */
+  CustomAttributes?: string;
+  /** Target model for multi-model endpoints */
+  TargetModel?: string;
+  /** Target variant for A/B testing */
+  TargetVariant?: string;
+  /** Inference ID for request tracking */
+  InferenceId?: string;
+};
+
+/**
+ * Response from SageMaker endpoint invocation
+ */
+export type InvokeEndpointResponse = {
+  /** Response body */
+  Body?: Uint8Array;
+  /** Content type of the response */
+  ContentType?: string;
+  /** Invoked production variant */
+  InvokedProductionVariant?: string;
+  /** Custom attributes in the response */
+  CustomAttributes?: string;
+};
+
+/**
+ * Streaming response chunk from SageMaker
+ */
+export type SageMakerStreamChunk = {
+  /** Text content in the chunk */
+  content?: string;
+  /** Indicates if this is the final chunk */
+  done?: boolean;
+  /** Usage information (only in final chunk) */
+  usage?: SageMakerUsage;
+  /** Error information if chunk contains error */
+  error?: string;
+  /** Finish reason for generation */
+  finishReason?:
+    | "stop"
+    | "length"
+    | "tool-calls"
+    | "content-filter"
+    | "unknown";
+  /** Tool call in progress (Phase 2.3) */
+  toolCall?: SageMakerStreamingToolCall;
+  /** Tool result chunk (Phase 2.3) */
+  toolResult?: SageMakerStreamingToolResult;
+  /** Structured output streaming (Phase 2.3) */
+  structuredOutput?: SageMakerStructuredOutput;
+};
+
+/**
+ * Tool call information for function calling
+ */
+export type SageMakerToolCall = {
+  /** Tool call identifier */
+  id: string;
+  /** Tool/function name */
+  name: string;
+  /** Tool arguments as JSON object */
+  arguments: Record<string, unknown>;
+  /** Tool call type */
+  type: "function";
+};
+
+/**
+ * Tool result information
+ */
+export type SageMakerToolResult = {
+  /** Tool call identifier */
+  toolCallId: string;
+  /** Tool name */
+  toolName: string;
+  /** Tool result data */
+  result: unknown;
+  /** Execution status */
+  status: "success" | "error";
+  /** Error message if status is error */
+  error?: string;
+};
+
+/**
+ * Streaming tool call information (Phase 2.3)
+ */
+export type SageMakerStreamingToolCall = {
+  /** Tool call identifier */
+  id: string;
+  /** Tool/function name */
+  name?: string;
+  /** Partial or complete arguments as JSON string */
+  arguments?: string;
+  /** Tool call type */
+  type: "function";
+  /** Indicates if this tool call is complete */
+  complete?: boolean;
+  /** Delta text for incremental argument building */
+  argumentsDelta?: string;
+};
+
+/**
+ * Streaming tool result information (Phase 2.3)
+ */
+export type SageMakerStreamingToolResult = {
+  /** Tool call identifier */
+  toolCallId: string;
+  /** Tool name */
+  toolName: string;
+  /** Partial or complete result data */
+  result?: unknown;
+  /** Result delta for incremental responses */
+  resultDelta?: string;
+  /** Execution status */
+  status: "pending" | "running" | "success" | "error";
+  /** Error message if status is error */
+  error?: string;
+  /** Indicates if this result is complete */
+  complete?: boolean;
+};
+
+/**
+ * Structured output streaming information (Phase 2.3)
+ */
+export type SageMakerStructuredOutput = {
+  /** Partial JSON object being built */
+  partialObject?: Record<string, unknown>;
+  /** JSON delta text */
+  jsonDelta?: string;
+  /** Current parsing path (e.g., "user.name") */
+  currentPath?: string;
+  /** Schema validation errors */
+  validationErrors?: string[];
+  /** Indicates if JSON is complete and valid */
+  complete?: boolean;
+  /** JSON schema being validated against */
+  schema?: Record<string, unknown>;
+};
+
+/**
+ * Enhanced generation request options
+ */
+export type SageMakerGenerationOptions = {
+  /** Input prompt text */
+  prompt: string;
+  /** System prompt for context */
+  systemPrompt?: string;
+  /** Maximum tokens to generate */
+  maxTokens?: number;
+  /** Temperature for randomness (0-1) */
+  temperature?: number;
+  /** Top-p nucleus sampling (0-1) */
+  topP?: number;
+  /** Top-k sampling */
+  topK?: number;
+  /** Stop sequences to end generation */
+  stopSequences?: string[];
+  /** Enable streaming response */
+  stream?: boolean;
+  /** Tools available for function calling */
+  tools?: Array<{
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  }>;
+  /** Tool choice mode */
+  toolChoice?: "auto" | "none" | { type: "tool"; name: string };
+};
+
+/**
+ * Generation response from SageMaker
+ */
+export type SageMakerGenerationResponse = {
+  /** Generated text content */
+  text: string;
+  /** Token usage information */
+  usage: SageMakerUsage;
+  /** Finish reason for generation */
+  finishReason: "stop" | "length" | "tool-calls" | "content-filter" | "unknown";
+  /** Tool calls made during generation */
+  toolCalls?: SageMakerToolCall[];
+  /** Tool results if tools were executed */
+  toolResults?: SageMakerToolResult[];
+  /** Additional metadata */
+  metadata?: Record<string, unknown>;
+  /** Model version or identifier */
+  modelVersion?: string;
+};
+
+/**
+ * Error codes specific to SageMaker operations
+ */
+export type SageMakerErrorCode =
+  | "VALIDATION_ERROR"
+  | "MODEL_ERROR"
+  | "INTERNAL_ERROR"
+  | "SERVICE_UNAVAILABLE"
+  | "CREDENTIALS_ERROR"
+  | "NETWORK_ERROR"
+  | "ENDPOINT_NOT_FOUND"
+  | "THROTTLING_ERROR"
+  | "UNKNOWN_ERROR";
+
+/**
+ * SageMaker-specific error information
+ */
+export type SageMakerErrorInfo = {
+  /** Error code */
+  code: SageMakerErrorCode;
+  /** Human-readable error message */
+  message: string;
+  /** HTTP status code if applicable */
+  statusCode?: number;
+  /** Original error from AWS SDK */
+  cause?: Error;
+  /** Endpoint name where error occurred */
+  endpoint?: string;
+  /** Request ID for debugging */
+  requestId?: string;
+  /** Retry suggestion */
+  retryable?: boolean;
+};
+
+/**
+ * Batch inference job configuration
+ */
+export type BatchInferenceConfig = {
+  /** Input S3 location */
+  inputS3Uri: string;
+  /** Output S3 location */
+  outputS3Uri: string;
+  /** SageMaker model name */
+  modelName: string;
+  /** Instance type for batch job */
+  instanceType: string;
+  /** Instance count for batch job */
+  instanceCount: number;
+  /** Maximum payload size in MB */
+  maxPayloadInMB?: number;
+  /** Batch strategy */
+  batchStrategy?: "MultiRecord" | "SingleRecord";
+};
+
+/**
+ * Model deployment configuration
+ */
+export type ModelDeploymentConfig = {
+  /** Model name */
+  modelName: string;
+  /** Endpoint name */
+  endpointName: string;
+  /** EC2 instance type */
+  instanceType: string;
+  /** Initial instance count */
+  initialInstanceCount: number;
+  /** Model data S3 location */
+  modelDataUrl: string;
+  /** Container image URI */
+  image: string;
+  /** IAM execution role ARN */
+  executionRoleArn: string;
+  /** Resource tags */
+  tags?: Record<string, string>;
+  /** Auto scaling configuration */
+  autoScaling?: {
+    minCapacity: number;
+    maxCapacity: number;
+    targetValue: number;
+    scaleUpCooldown: number;
+    scaleDownCooldown: number;
+  };
+};
+
+/**
+ * Endpoint metrics and monitoring data
+ */
+export type EndpointMetrics = {
+  /** Endpoint name */
+  endpointName: string;
+  /** Total invocations */
+  invocations: number;
+  /** Average latency in milliseconds */
+  averageLatency: number;
+  /** Error rate percentage */
+  errorRate: number;
+  /** CPU utilization percentage */
+  cpuUtilization?: number;
+  /** Memory utilization percentage */
+  memoryUtilization?: number;
+  /** Instance count */
+  instanceCount: number;
+  /** Timestamp of metrics as ISO 8601 date string */
+  timestamp: string;
+};
+
+/**
+ * Cost estimation data
+ */
+export type CostEstimate = {
+  /** Estimated cost in USD */
+  estimatedCost: number;
+  /** Currency code */
+  currency: string;
+  /** Cost breakdown */
+  breakdown: {
+    /** Instance hours cost */
+    instanceCost: number;
+    /** Request-based cost */
+    requestCost: number;
+    /** Total processing hours */
+    totalHours: number;
+  };
+  /** Time period for estimate */
+  period?: {
+    start: string; // ISO 8601 date string
+    end: string; // ISO 8601 date string
+  };
+};
+
+/**
+ * SageMaker generation result type for better type safety
+ */
+export type SageMakerGenerateResult = {
+  text?: string;
+  reasoning?:
+    | string
+    | Array<
+        | { type: "text"; text: string; signature?: string }
+        | { type: "redacted"; data: string }
+      >;
+  files?: Array<{ data: string | Uint8Array; mimeType: string }>;
+  logprobs?: Array<{
+    token: string;
+    logprob: number;
+    topLogprobs: Array<{ token: string; logprob: number }>;
+  }>;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens?: number;
+  };
+  finishReason:
+    | "stop"
+    | "length"
+    | "content-filter"
+    | "tool-calls"
+    | "error"
+    | "unknown";
+  warnings?: Array<{ type: "other"; message: string }>;
+  rawCall: { rawPrompt: unknown; rawSettings: Record<string, unknown> };
+  rawResponse?: { headers?: Record<string, string> };
+  request?: { body?: string };
+  toolCalls?: SageMakerToolCall[];
+  object?: unknown;
+};
+
+export type ProviderHealthStatusOptions = {
+  provider: AIProviderName;
+  isHealthy: boolean;
+  isConfigured: boolean;
+  hasApiKey: boolean;
+  lastChecked: Date;
+  error?: string;
+  warning?: string;
+  responseTime?: number;
+  configurationIssues: string[];
+  recommendations: string[];
+};
+
+export type ProviderHealthCheckOptions = {
+  timeout?: number;
+  includeConnectivityTest?: boolean;
+  includeModelValidation?: boolean;
+  cacheResults?: boolean;
+  maxCacheAge?: number;
+};
+
+// ============================================================================
+// Provider-Specific Namespace Types (Using Interfaces for Declaration Merging)
+// ============================================================================
+//
+// Note: The following namespace exports use `interface` instead of `type` to enable
+// TypeScript declaration merging. This allows downstream consumers to augment these
+// interfaces with additional properties or methods while maintaining type safety.
+// Declaration merging is not possible with type aliases, making interfaces the
+// preferred choice for extensible provider-specific type definitions.
 
 /**
  * Amazon Bedrock specific types
@@ -465,88 +1272,3 @@ export namespace TelemetryTypes {
     recordException(exception: unknown): void;
   }
 }
-
-/**
- * Provider factory function type
- */
-export type ProviderFactory = (
-  modelName?: string,
-  providerName?: string,
-  sdk?: unknown,
-) => Promise<unknown>;
-
-/**
- * Provider constructor type
- */
-export type ProviderConstructor = {
-  new (modelName?: string, providerName?: string, sdk?: unknown): unknown;
-};
-
-/**
- * Provider registration entry
- */
-export type ProviderRegistration = {
-  name: string;
-  constructor: ProviderConstructor | ProviderFactory;
-  capabilities?: ProviderCapabilities;
-  defaultConfig?: IndividualProviderConfig;
-};
-
-/**
- * Provider metadata type
- */
-export type ProviderMetadata = {
-  name: string;
-  version: string;
-  capabilities: ProviderCapability[];
-  models: string[];
-  healthStatus: ProviderHealthStatus;
-};
-
-/**
- * Provider capability type
- */
-export type ProviderCapability =
-  | "text-generation"
-  | "streaming"
-  | "tool-calling"
-  | "image-generation"
-  | "embeddings";
-
-/**
- * Extended tool type that combines AI SDK tools with external MCP tool info
- */
-export type ExtendedTool = Tool & Partial<ExternalMCPToolInfo>;
-
-/**
- * AI SDK generate result with steps support (extends GenerateResult)
- */
-export type AISDKGenerateResult = GenerateResult & {
-  steps?: Array<{
-    toolCalls?: Array<{
-      toolName?: string;
-      name?: string;
-      [key: string]: unknown;
-    }>;
-    [key: string]: unknown;
-  }>;
-  [key: string]: unknown;
-};
-
-/**
- * Default provider configurations
- */
-export const DEFAULT_PROVIDER_CONFIGS: ProviderConfig[] = [
-  {
-    provider: AIProviderName.BEDROCK,
-    models: [BedrockModels.CLAUDE_3_7_SONNET, BedrockModels.CLAUDE_3_5_SONNET],
-  },
-  {
-    provider: AIProviderName.VERTEX,
-    models: [VertexModels.CLAUDE_4_0_SONNET, VertexModels.GEMINI_2_5_FLASH],
-  },
-  {
-    provider: AIProviderName.OPENAI,
-    models: [OpenAIModels.GPT_4O, OpenAIModels.GPT_4O_MINI],
-  },
-];
