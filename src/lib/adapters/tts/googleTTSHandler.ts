@@ -8,17 +8,23 @@
  */
 import { TextToSpeechClient } from "@google-cloud/text-to-speech";
 import { TTSError, TTS_ERROR_CODES } from "../../utils/ttsProcessor.js";
-import type { TTSHandler } from "../../utils/ttsProcessor.js";
 import type {
-  Gender,
+  TTSGender,
   GoogleAudioEncoding,
   TTSOptions,
   TTSResult,
   TTSVoice,
-  VoiceType,
-} from "../../types/ttsTypes.js";
+  TTSVoiceType,
+  TTSHandler,
+} from "../../types/index.js";
 import { ErrorCategory, ErrorSeverity } from "../../constants/enums.js";
 import { logger } from "../../utils/logger.js";
+import {
+  SpanSerializer,
+  SpanType,
+  SpanStatus,
+  getMetricsAggregator,
+} from "../../observability/index.js";
 
 export class GoogleTTSHandler implements TTSHandler {
   private client: TextToSpeechClient | null = null;
@@ -88,6 +94,15 @@ export class GoogleTTSHandler implements TTSHandler {
       });
     }
 
+    const span = SpanSerializer.createSpan(
+      SpanType.TTS,
+      "tts.google.listVoices",
+      {
+        "tts.operation": "listVoices",
+        "tts.provider": "google",
+      },
+    );
+
     try {
       // Return cached voices if available, valid, and no language filter is specified
       if (
@@ -96,6 +111,8 @@ export class GoogleTTSHandler implements TTSHandler {
           GoogleTTSHandler.CACHE_TTL_MS &&
         !languageCode
       ) {
+        const endedSpan = SpanSerializer.endSpan(span, SpanStatus.OK);
+        getMetricsAggregator().recordSpan(endedSpan);
         return this.voicesCache.voices;
       }
 
@@ -106,6 +123,8 @@ export class GoogleTTSHandler implements TTSHandler {
 
       if (!response.voices || response.voices.length === 0) {
         logger.warn("Google Cloud TTS returned no voices");
+        const endedSpan = SpanSerializer.endSpan(span, SpanStatus.OK);
+        getMetricsAggregator().recordSpan(endedSpan);
         return [];
       }
 
@@ -131,8 +150,8 @@ export class GoogleTTSHandler implements TTSHandler {
 
         const voiceType = this.detectVoiceType(voiceName);
 
-        // Map Google's ssmlGender → internal Gender
-        const gender: Gender =
+        // Map Google's ssmlGender → internal TTSGender
+        const gender: TTSGender =
           voice.ssmlGender === "MALE"
             ? "male"
             : voice.ssmlGender === "FEMALE"
@@ -155,8 +174,17 @@ export class GoogleTTSHandler implements TTSHandler {
         this.voicesCache = { voices, timestamp: Date.now() };
       }
 
+      const endedSpan = SpanSerializer.endSpan(span, SpanStatus.OK);
+      getMetricsAggregator().recordSpan(endedSpan);
       return voices;
     } catch (err) {
+      // Record error span
+      const endedSpan = SpanSerializer.endSpan(
+        span,
+        SpanStatus.ERROR,
+        err instanceof Error ? err.message : "Unknown error",
+      );
+      getMetricsAggregator().recordSpan(endedSpan);
       // Log error but return empty array for graceful degradation
       const message = err instanceof Error ? err.message : "Unknown error";
       logger.error(`Failed to fetch Google TTS voices: ${message}`);
@@ -183,6 +211,17 @@ export class GoogleTTSHandler implements TTSHandler {
       });
     }
 
+    const voiceId = options.voice ?? "en-US-Neural2-C";
+    const span = SpanSerializer.createSpan(
+      SpanType.TTS,
+      "tts.google.synthesize",
+      {
+        "tts.operation": "synthesize",
+        "tts.provider": "google",
+        "tts.voice": voiceId,
+        "tts.format": options.format ?? "mp3",
+      },
+    );
     const startTime = Date.now();
 
     try {
@@ -203,8 +242,6 @@ export class GoogleTTSHandler implements TTSHandler {
           retriable: false,
         });
       }
-
-      const voiceId = options.voice ?? "en-US-Neural2-C";
 
       const languageCode = this.extractLanguageCode(voiceId);
       const audioEncoding = this.mapFormat(options.format ?? "mp3");
@@ -258,6 +295,9 @@ export class GoogleTTSHandler implements TTSHandler {
 
       const latency = Date.now() - startTime;
 
+      const endedSpan = SpanSerializer.endSpan(span, SpanStatus.OK);
+      getMetricsAggregator().recordSpan(endedSpan);
+
       return {
         buffer,
         format: options.format ?? "mp3",
@@ -269,6 +309,13 @@ export class GoogleTTSHandler implements TTSHandler {
         },
       };
     } catch (err) {
+      const endedSpan = SpanSerializer.endSpan(
+        span,
+        SpanStatus.ERROR,
+        err instanceof Error ? err.message : String(err),
+      );
+      getMetricsAggregator().recordSpan(endedSpan);
+
       if (err instanceof TTSError) {
         throw err;
       }
@@ -356,7 +403,7 @@ export class GoogleTTSHandler implements TTSHandler {
    * detectVoiceType("en-US-Chirp-A") // returns "chirp"
    * detectVoiceType("en-US-Journey-D") // returns "unknown" (unrecognized type)
    */
-  private detectVoiceType(name: string): VoiceType {
+  private detectVoiceType(name: string): TTSVoiceType {
     const tokens = name.toLowerCase().split("-");
 
     if (tokens.some((t) => t.startsWith("chirp"))) {

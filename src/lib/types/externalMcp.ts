@@ -9,9 +9,10 @@ import type { ChildProcess } from "child_process";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 /**
- * Supported MCP transport protocols
+ * Supported MCP transport protocols - imported from mcpTypes.js (canonical definition)
  */
-export type MCPTransportType = "stdio" | "sse" | "websocket";
+import type { MCPTransportType, MCPServerInfo } from "./mcp.js";
+export type { MCPTransportType } from "./mcp.js";
 
 /**
  * External MCP server configuration for process spawning
@@ -47,8 +48,11 @@ export type ExternalMCPServerConfig = {
   /** Working directory for the process */
   cwd?: string;
 
-  /** URL for SSE/WebSocket transports */
+  /** URL for SSE/WebSocket/HTTP transports */
   url?: string;
+
+  /** HTTP headers for authentication and configuration (HTTP/SSE/WebSocket) */
+  headers?: Record<string, string>;
 
   /** List of tool names to block/blacklist from this server */
   blockedTools?: string[];
@@ -302,6 +306,7 @@ export type ExternalMCPServerEvents = {
   /** Server status changed */
   statusChanged: {
     serverId: string;
+    serverName: string;
     oldStatus: ExternalMCPServerStatus;
     newStatus: ExternalMCPServerStatus;
     timestamp: Date;
@@ -310,6 +315,7 @@ export type ExternalMCPServerEvents = {
   /** Server connected successfully */
   connected: {
     serverId: string;
+    serverName: string;
     toolCount: number;
     timestamp: Date;
   };
@@ -317,6 +323,7 @@ export type ExternalMCPServerEvents = {
   /** Server disconnected */
   disconnected: {
     serverId: string;
+    serverName: string;
     reason?: string;
     timestamp: Date;
   };
@@ -324,6 +331,7 @@ export type ExternalMCPServerEvents = {
   /** Server failed */
   failed: {
     serverId: string;
+    serverName: string;
     error: string;
     timestamp: Date;
   };
@@ -331,6 +339,7 @@ export type ExternalMCPServerEvents = {
   /** Tool discovered */
   toolDiscovered: {
     serverId: string;
+    serverName: string;
     toolName: string;
     toolInfo: ExternalMCPToolInfo;
     timestamp: Date;
@@ -339,6 +348,7 @@ export type ExternalMCPServerEvents = {
   /** Tool removed */
   toolRemoved: {
     serverId: string;
+    serverName: string;
     toolName: string;
     timestamp: Date;
   };
@@ -346,6 +356,7 @@ export type ExternalMCPServerEvents = {
   /** Health check completed */
   healthCheck: {
     serverId: string;
+    serverName: string;
     health: ExternalMCPServerHealth;
     timestamp: Date;
   };
@@ -381,3 +392,53 @@ export type ExternalMCPManagerConfig = {
 };
 
 // Note: In Phase 2, these interfaces will be consolidated into MCPServerInfo
+
+/**
+ * Extended MCPServerInfo with runtime state for external servers
+ * Represents the transition towards zero-conversion architecture by combining
+ * configuration fields from MCPServerInfo with runtime-only state needed for
+ * active server management (process handles, clients, metrics, etc.)
+ */
+export type RuntimeMCPServerInfo = MCPServerInfo & {
+  /** Child process handle (for stdio transport, null for HTTP transports) */
+  process: import("child_process").ChildProcess | null;
+  /** MCP client instance for communication */
+  client: Client | null;
+  /** Transport instance (renamed from 'transport' to avoid conflict with MCPServerInfo.transport) */
+  transportInstance: Transport | null;
+  /** Last error message if any */
+  lastError?: string;
+  /** When the server was started */
+  startTime?: Date;
+  /** When the server was last seen healthy */
+  lastHealthCheck?: Date;
+  /** Number of reconnection attempts */
+  reconnectAttempts: number;
+  /** Maximum reconnection attempts before giving up */
+  maxReconnectAttempts: number;
+  /** Server capabilities reported during MCP handshake */
+  capabilities?: Record<string, JsonValue>;
+  /** Health monitoring timer */
+  healthTimer?: NodeJS.Timeout;
+  /** Restart backoff timer */
+  restartTimer?: NodeJS.Timeout;
+  /** Performance metrics for this server */
+  metrics: {
+    totalConnections: number;
+    totalDisconnections: number;
+    totalErrors: number;
+    totalToolCalls: number;
+    averageResponseTime: number;
+    lastResponseTime: number;
+  };
+  /** Legacy compatibility - maintain tools map for now */
+  toolsMap: Map<string, ExternalMCPToolInfo>;
+  /** Cached tools array for ZERO conversion - MCP format */
+  toolsArray?: Array<{
+    name: string;
+    description: string;
+    inputSchema?: object;
+  }>;
+  /** Compatibility field for existing code - stores MCPServerInfo config */
+  config: MCPServerInfo;
+};

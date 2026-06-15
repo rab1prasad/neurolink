@@ -1,5 +1,94 @@
 # NeuroLink System Patterns
 
+## ✅ **GEMINI 3 NATIVE PATH — CONVERSATION HISTORY RECONSTRUCTION** (2026-04-17)
+
+### **`prependConversationHistory` — How It Works**
+
+Gemini's API requires strictly alternating `user → model → user → model` turns. Redis stores flat `tool_call`/`tool_result` messages. `prependConversationHistory` reconstructs the correct Gemini history from those flat messages before every new API call.
+
+**Algorithm:**
+1. Walk `conversationMessages` in order
+2. `tool_call` messages → grouped into a `ToolStep.callParts[]` (becomes a model turn)
+3. `tool_result` messages → grouped into the same `ToolStep.resultParts[]` (becomes a user turn)
+4. Regular `user`/`assistant` text messages → emitted inline as `RegularSegment`
+5. Emit all segments in order: regular segments as-is; ToolSteps as `model(callParts) + user(resultParts)`
+
+**Composite key for grouping:**
+```typescript
+// With executionId (new messages): key = "exec:<uuid>:<stepIndex>"
+// Without executionId (legacy messages): key = "turn:<turnCounter>:<stepIndex>"
+const makeKey = (stepIndex: number | undefined, executionId: string | undefined): string =>
+  executionId !== undefined
+    ? `exec:${executionId}:${stepIndex ?? "undefined"}`
+    : `turn:${turnCounter}:${stepIndex ?? "undefined"}`;
+```
+
+- `stepIndex` groups parallel function calls from the same agentic loop step into one model turn
+- `turnCounter` (incremented per regular text message) acts as boundary between sequential loop invocations — prevents step 1 of loop A from colliding with step 1 of loop B when both happen without a text message between them
+- `executionId` is the definitive fix for multi-execution session overlap (once implemented): each UUID is guaranteed unique per invocation, no possibility of collision
+
+**`thoughtSignature` Replay:**
+- On `tool_call` messages: `thoughtSignature` emitted as sibling field on the `functionCall` part
+- On `assistant` text messages: `thoughtSignature` emitted as sibling field on the `text` part
+- Never wrapped — Gemini requires the token to sit next to the content, not above it
+
+### **Canonical Code Pattern**
+```typescript
+// In googleVertex.ts → prependConversationHistory
+type ToolStep = {
+  type: "tool_step";
+  callParts: unknown[];
+  resultParts: unknown[];
+};
+
+const stepMap = new Map<string, ToolStep>();
+const makeKey = (stepIndex: number | undefined, executionId: string | undefined) =>
+  executionId !== undefined
+    ? `exec:${executionId}:${stepIndex ?? "undefined"}`
+    : `turn:${turnCounter}:${stepIndex ?? "undefined"}`;
+
+// tool_call handler
+if (msg.role === "tool_call") {
+  const step = getOrCreateStep(msg.metadata?.stepIndex, msg.metadata?.executionId);
+  const fcPart: Record<string, unknown> = {
+    functionCall: { name: msg.tool, args: msg.args || {} }
+  };
+  if (msg.metadata?.thoughtSignature) {
+    fcPart.thoughtSignature = msg.metadata.thoughtSignature; // sibling, not wrapper
+  }
+  step.callParts.push(fcPart);
+}
+```
+
+### **`stepIndex` Tagging in the Agentic Loop**
+```typescript
+// In executeNativeGemini3Stream / executeNativeGemini3Generate
+const executionId = randomUUID(); // once per invocation (pending implementation)
+let step = 0;
+
+while (step < maxSteps) {
+  step++;
+  // ... get Gemini response ...
+  const stepThoughtSig = extractThoughtSignature(chunkResult.rawResponseParts);
+
+  // Tag tool calls with this step's metadata before storing to Redis
+  const taggedToolCalls = stepToolCalls.map((tc, i) => ({
+    ...tc,
+    ...(i === 0 && stepThoughtSig ? { thoughtSignature: stepThoughtSig } : {}),
+    stepIndex: step,
+    executionId,          // (pending)
+  }));
+  const taggedToolResults = stepToolExecs.map((te) => ({
+    toolName: te.name,
+    result: te.output,
+    stepIndex: step,
+    executionId,          // (pending)
+  }));
+}
+```
+
+---
+
 ## ✅ **GENERATE FUNCTION MIGRATION COMPLETE** (2025-01-07)
 
 ### **Factory-Enhanced Generate Architecture**
@@ -86,14 +175,14 @@ export class SemaphoreManager {
 ### **Concurrent Execution Management**
 ```typescript
 // Queue depth monitoring and performance tracking
-interface SemaphoreStats {
+type SemaphoreStats = {
   activeOperations: number;
   queuedOperations: number;
   totalOperations: number;
   totalWaitTime: number;
   averageWaitTime: number;
   peakQueueDepth: number;
-}
+};
 ```
 
 ---
@@ -103,13 +192,13 @@ interface SemaphoreStats {
 ### **Dynamic Tool Selection**
 ```typescript
 // AI decides tool sequence based on task requirements
-export interface ToolDecision {
+export type ToolDecision = {
   toolName: string;
   args: Record<string, any>;
   reasoning: string;
   confidence: number;
   shouldContinue: boolean;
-}
+};
 
 // Dynamic chain execution with AI decision-making
 export class DynamicOrchestrator {
@@ -138,7 +227,7 @@ export class AIModelChainPlanner {
 ### **Session Lifecycle Management**
 ```typescript
 // UUID-based session tracking with TTL
-export interface OrchestratorSession {
+export type OrchestratorSession = {
   id: string;                          // UUID v4
   context: NeuroLinkExecutionContext;
   toolHistory: ToolResult[];
@@ -151,7 +240,7 @@ export interface OrchestratorSession {
   createdAt: number;
   lastActivity: number;
   expiresAt: number;
-}
+};
 ```
 
 ### **State Persistence**
@@ -181,14 +270,14 @@ export enum ConnectionStatus {
 }
 
 // Health check with latency monitoring
-export interface HealthCheckResult {
+export type HealthCheckResult = {
   success: boolean;
   status: ConnectionStatus;
   message?: string;
   latency?: number;
   error?: Error;
   timestamp: number;
-}
+};
 ```
 
 ### **Auto-Recovery Mechanisms**
@@ -255,14 +344,14 @@ export class ErrorRecovery {
 ### **Transport Abstraction**
 ```typescript
 // Protocol-agnostic transport layer
-export interface MCPTransport {
+export type MCPTransport = {
   type: 'stdio' | 'sse' | 'http';
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   send(message: any): Promise<void>;
   receive(): AsyncIterableIterator<any>;
   getStatus(): ConnectionStatus;
-}
+};
 
 // Transport manager with failover
 export class TransportManager {
@@ -274,15 +363,82 @@ export class TransportManager {
 }
 ```
 
+### **HTTP/Streamable HTTP Transport Pattern (NEW - MCP 2025 Spec)**
+```typescript
+// HTTP transport for remote MCP servers (GitHub Copilot, Enterprise APIs)
+type HTTPMCPServerConfig = {
+  transport: 'http';                    // Transport type identifier
+  url: string;                          // HTTP endpoint URL
+  headers?: Record<string, string>;     // Custom headers for authentication
+  httpOptions?: {
+    timeout?: number;                   // Connection timeout in ms
+    retries?: number;                   // Max retry attempts
+  };
+  retryConfig?: {
+    maxRetries?: number;
+    initialDelayMs?: number;
+    maxDelayMs?: number;
+  };
+  rateLimiting?: {
+    maxRequestsPerSecond?: number;
+    burstLimit?: number;
+  };
+};
+
+// Usage pattern: Adding HTTP MCP server programmatically
+await neurolink.addInMemoryMCPServer("github-copilot", {
+  server: {
+    title: "GitHub Copilot MCP",
+    description: "GitHub Copilot API integration",
+    tools: {},
+  },
+  config: {
+    id: "github-copilot",
+    name: "github-copilot",
+    transport: "http",
+    url: "https://api.githubcopilot.com/mcp",
+    headers: {
+      Authorization: "Bearer YOUR_GITHUB_COPILOT_TOKEN"
+    },
+    tools: [],
+    status: "initializing",
+  },
+});
+
+// Usage pattern: JSON configuration file (.mcp-config.json)
+{
+  "mcpServers": {
+    "github-copilot": {
+      "name": "github-copilot",
+      "transport": "http",
+      "url": "https://api.githubcopilot.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ghp_xxxx"
+      }
+    }
+  }
+}
+```
+
+### **HTTP Transport vs Other Transports**
+| Feature | stdio | SSE | HTTP |
+|---------|-------|-----|------|
+| Local servers | Yes | No | No |
+| Remote servers | No | Yes | Yes |
+| Authentication | Env vars | Headers | Headers |
+| Session management | No | Partial | Yes |
+| Auto-reconnection | No | Partial | Yes |
+| MCP Specification | Core | Core | 2025 |
+
 ### **Graceful Failover**
 ```typescript
 // Automatic transport switching on failure
-interface TransportFailoverOptions {
+type TransportFailoverOptions = {
   maxRetries: number;
   retryDelay: number;
   preferredTransports: string[];
   fallbackTimeout: number;
-}
+};
 ```
 
 ---
@@ -313,7 +469,7 @@ export class AgentEnhancedProvider implements AIProvider {
 ### **Analytics Integration**
 ```typescript
 // Enhanced analytics with MCP metrics
-interface MCPAnalytics {
+type MCPAnalytics = {
   toolExecutions: number;
   averageToolLatency: number;
   sessionCount: number;
@@ -321,7 +477,7 @@ interface MCPAnalytics {
   healthCheckResults: HealthCheckResult[];
   errorRate: number;
   recoverySuccessRate: number;
-}
+};
 ```
 
 ---
@@ -344,12 +500,12 @@ const PERFORMANCE_BENCHMARKS = {
 ### **Memory Management**
 ```typescript
 // Session cleanup and resource management
-interface ResourceManagement {
+type ResourceManagement = {
   maxActiveSessions: number;        // Default: 100
   sessionCleanupInterval: number;   // Default: 300000 (5 minutes)
   maxConcurrentOperations: number;  // Default: 50
   memoryThreshold: number;          // Default: 200MB
-}
+};
 ```
 
 ---
@@ -359,7 +515,7 @@ interface ResourceManagement {
 ### **Context Isolation**
 ```typescript
 // Session-based context isolation
-interface SecurityContext {
+type SecurityContext = {
   sessionId: string;
   userId?: string;
   permissions: string[];
@@ -369,7 +525,7 @@ interface SecurityContext {
     maxConcurrentOps: number;
     maxMemoryUsage: number;
   };
-}
+};
 ```
 
 ### **Input Validation**
@@ -643,7 +799,7 @@ export type ConversationMemoryConfig = {
 };
 
 // Redis storage configuration
-export interface RedisStorageConfig {
+export type RedisStorageConfig = {
   host?: string;
   port?: number;
   password?: string;
@@ -652,7 +808,7 @@ export interface RedisStorageConfig {
   keyPrefix?: string;
   connectionTimeout?: number;
   ttl?: number;
-}
+};
 ```
 
 ### **Configuration Validation Pattern**
@@ -776,13 +932,13 @@ export class GlobalSessionManager {
 // Typed session variable system
 type SessionVariableValue = string | number | boolean;
 
-interface LoopSessionState {
+type LoopSessionState = {
   neurolinkInstance: NeuroLink;
   sessionId: string;
   isActive: boolean;
   conversationMemoryConfig?: ConversationMemoryConfig;
   sessionVariables: Record<string, SessionVariableValue>;
-}
+};
 
 // Session commands: set, get, unset, show, clear
 // Example: set provider openai
@@ -1022,17 +1178,17 @@ src/lib/mcp/
 ### **Optional Interface Methods Pattern**
 ```typescript
 // Maximum flexibility with optional methods
-interface McpRegistry {
+type McpRegistry = {
   registerServer?(serverId: string, config?: unknown, context?: ExecutionContext): Promise<void>;
   executeTool?<T>(toolName: string, args?: unknown, context?: ExecutionContext): Promise<T>;
   listTools?(context?: ExecutionContext): Promise<ToolInfo[]>;
-}
+};
 ```
 
 ### **Rich Context Flow Pattern**
 ```typescript
 // Context flows through all MCP operations
-interface ExecutionContext {
+type ExecutionContext = {
   sessionId?: string;
   userId?: string;
   aiProvider?: string;
@@ -1040,7 +1196,7 @@ interface ExecutionContext {
   cacheOptions?: CacheOptions;
   fallbackOptions?: FallbackOptions;
   metadata?: Record<string, unknown>;
-}
+};
 ```
 
 ### **Error Recovery Pattern**
@@ -1190,13 +1346,13 @@ The NeuroLink toolkit follows a structured architecture based on the following p
 
 ### 1. AIProvider Interface
 
-The central interface that all providers implement:
+The central type that all providers implement:
 
 ```typescript
-interface AIProvider {
+type AIProvider = {
   generate(options: GenerateOptions): Promise<GenerateResult>;
   stream(options: StreamOptions): Promise<StreamResult>;
-}
+};
 ```
 
 ### 2. Provider Implementations

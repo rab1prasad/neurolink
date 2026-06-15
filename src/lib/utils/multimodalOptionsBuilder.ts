@@ -1,4 +1,4 @@
-import type { StreamOptions } from "../types/streamTypes.js";
+import type { StreamOptions } from "../types/index.js";
 
 /**
  * Builds a normalized multimodal options payload for streaming providers.
@@ -66,5 +66,6 @@ export function buildMultimodalOptions(
     enableAnalytics: options.enableAnalytics,
     enableEvaluation: options.enableEvaluation,
     context: options.context,
+    fileRegistry: (options as Record<string, unknown>).fileRegistry,
   };
 }

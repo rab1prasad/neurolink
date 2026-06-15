@@ -1,56 +1,87 @@
-/**
- * Amazon SageMaker Provider Implementation (Simplified)
- *
- * This module provides a simplified SageMaker provider that extends BaseProvider
- * and integrates with the NeuroLink ecosystem using existing patterns.
- */
-
-import type { ZodType, ZodTypeDef } from "zod";
-import type { Schema, LanguageModelV1 } from "ai";
-import { AIProviderName } from "../constants/enums.js";
-import type { StreamOptions, StreamResult } from "../types/streamTypes.js";
-import type { ConnectivityResult } from "../types/typeAliases.js";
+import type { ZodType } from "zod";
+import type { AIProviderName } from "../constants/enums.js";
 import { BaseProvider } from "../core/baseProvider.js";
-import { logger } from "../utils/logger.js";
-
-// SageMaker-specific imports
-import {
-  getSageMakerConfig,
-  getSageMakerModelConfig,
-  getDefaultSageMakerEndpoint,
-  getSageMakerModel,
-} from "./sagemaker/config.js";
-import { handleSageMakerError, SageMakerError } from "./sagemaker/errors.js";
-import { SageMakerLanguageModel } from "./sagemaker/language-model.js";
+import type { NeuroLink } from "../neurolink.js";
 import type {
   SageMakerConfig,
   SageMakerModelConfig,
-} from "../types/providers.js";
+  StreamOptions,
+  StreamResult,
+  ConnectivityResult,
+  SageMakerAsLanguageModel,
+} from "../types/index.js";
+import { logger } from "../utils/logger.js";
+import { withSpan } from "../telemetry/withSpan.js";
+import { tracers } from "../telemetry/tracers.js";
+// SageMaker-specific imports
+import {
+  getDefaultSageMakerEndpoint,
+  getSageMakerConfig,
+  getSageMakerModel,
+  getSageMakerModelConfig,
+} from "./sagemaker/config.js";
+import { handleSageMakerError, SageMakerError } from "./sagemaker/errors.js";
+import { SageMakerLanguageModel } from "./sagemaker/language-model.js";
+import type { LanguageModel, Schema } from "../types/index.js";
 
 /**
  * Amazon SageMaker Provider extending BaseProvider
  */
 export class AmazonSageMakerProvider extends BaseProvider {
-  private sagemakerModel: LanguageModelV1;
+  private sagemakerModel: LanguageModel;
   private sagemakerConfig: SageMakerConfig;
   private modelConfig: SageMakerModelConfig;
 
-  constructor(modelName?: string, endpointName?: string, region?: string) {
-    super(modelName, "sagemaker" as AIProviderName);
+  constructor(
+    modelName?: string,
+    endpointName?: string,
+    region?: string,
+    neurolink?: NeuroLink,
+    credentials?: {
+      accessKeyId?: string;
+      secretAccessKey?: string;
+      sessionToken?: string;
+      region?: string;
+      endpoint?: string;
+    },
+  ) {
+    super(modelName, "sagemaker" as AIProviderName, neurolink);
 
     try {
-      // Load and validate configuration
-      this.sagemakerConfig = getSageMakerConfig(region);
+      // Load and validate configuration, then overlay per-request credentials
+      const baseConfig = getSageMakerConfig(credentials?.region ?? region);
+      this.sagemakerConfig = {
+        ...baseConfig,
+        ...(credentials?.region !== undefined && {
+          region: credentials.region,
+        }),
+        ...(credentials?.accessKeyId !== undefined && {
+          accessKeyId: credentials.accessKeyId,
+        }),
+        ...(credentials?.secretAccessKey !== undefined && {
+          secretAccessKey: credentials.secretAccessKey,
+        }),
+        ...(credentials?.sessionToken !== undefined && {
+          sessionToken: credentials.sessionToken,
+        }),
+        ...(credentials?.endpoint !== undefined && {
+          endpoint: credentials.endpoint,
+        }),
+      };
       this.modelConfig = getSageMakerModelConfig(
         endpointName || getDefaultSageMakerEndpoint(),
       );
 
-      // Create the proper LanguageModel (v2) implementation
-      this.sagemakerModel = new SageMakerLanguageModel(
+      // Create the SageMaker LanguageModel implementation.
+      // SageMakerLanguageModel implements SageMakerAsLanguageModel which is
+      // structurally compatible with LanguageModelV2 (specificationVersion "v2",
+      // modelId, provider, supportedUrls, doGenerate, doStream).
+      const smModel: SageMakerAsLanguageModel = new SageMakerLanguageModel(
         this.modelName,
         this.sagemakerConfig,
         this.modelConfig,
       );
+      this.sagemakerModel = smModel as LanguageModel;
 
       logger.debug("Amazon SageMaker Provider initialized", {
         modelName: this.modelName,
@@ -77,30 +108,45 @@ export class AmazonSageMakerProvider extends BaseProvider {
     return getSageMakerModel();
   }
 
-  protected getAISDKModel(): LanguageModelV1 {
+  protected getAISDKModel(): LanguageModel {
     return this.sagemakerModel;
   }
 
   protected async executeStream(
     _options: StreamOptions,
-    _analysisSchema?: ZodType<unknown, ZodTypeDef, unknown> | Schema<unknown>,
+    _analysisSchema?: ZodType | Schema<unknown>,
   ): Promise<StreamResult> {
-    try {
-      // For now, throw an error indicating this is not yet implemented
-      throw new SageMakerError(
-        "SageMaker streaming not yet fully implemented. Coming in next phase.",
-        {
-          code: "MODEL_ERROR",
-          statusCode: 501,
-          endpoint: this.modelConfig.endpointName,
+    return withSpan(
+      {
+        name: "neurolink.provider.sagemaker.stream",
+        tracer: tracers.stream,
+        attributes: {
+          "provider.name": "sagemaker",
+          "model.name": this.modelName,
+          "sagemaker.endpoint": this.modelConfig.endpointName,
+          "sagemaker.region": this.sagemakerConfig.region,
+          "sagemaker.not_implemented": true,
         },
-      );
-    } catch (error) {
-      throw this.handleProviderError(error);
-    }
+      },
+      async () => {
+        try {
+          // For now, throw an error indicating this is not yet implemented
+          throw new SageMakerError(
+            "SageMaker streaming not yet fully implemented. Coming in next phase.",
+            {
+              code: "MODEL_ERROR",
+              statusCode: 501,
+              endpoint: this.modelConfig.endpointName,
+            },
+          );
+        } catch (error) {
+          throw this.handleProviderError(error);
+        }
+      },
+    );
   }
 
-  protected handleProviderError(error: unknown): Error {
+  protected formatProviderError(error: unknown): Error {
     if (error instanceof SageMakerError) {
       return error;
     }
@@ -183,7 +229,7 @@ export class AmazonSageMakerProvider extends BaseProvider {
   /**
    * Public method to get the AI SDK model for CLI and external usage
    */
-  public async getModel(): Promise<LanguageModelV1> {
+  public async getModel(): Promise<LanguageModel> {
     return this.getAISDKModel();
   }
 

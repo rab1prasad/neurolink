@@ -81,7 +81,42 @@ const claudeResult = await neurolink.generate({
 - `mcp-built-in-tools.js` - Using built-in tools (time, utilities)
 - `mcp-discovery.js` - Discovering external MCP servers
 - `mcp-testing.js` - Testing and validation examples
-- **`dynamic-mcp-servers.js`** - 🆕 **NEW!** Programmatic MCP server management
+- **`dynamic-mcp-servers.js`** - Programmatic MCP server management (stdio + HTTP)
+- **`http-transport-mcp.ts`** - HTTP transport for remote MCP servers (GitHub Copilot, etc.)
+
+### **HTTP Transport Configuration (NEW)**
+
+HTTP transport enables connecting to remote MCP servers via REST-style APIs. Example configuration:
+
+```json
+{
+  "mcpServers": {
+    "remote-api": {
+      "name": "remote-api",
+      "transport": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${API_TOKEN}"
+      },
+      "httpOptions": {
+        "connectionTimeout": 30000,
+        "requestTimeout": 60000
+      },
+      "retryConfig": {
+        "maxAttempts": 3,
+        "initialDelay": 1000,
+        "maxDelay": 30000
+      },
+      "rateLimiting": {
+        "requestsPerMinute": 60,
+        "maxBurst": 10
+      }
+    }
+  }
+}
+```
+
+See `http-transport-mcp.ts` for complete usage examples and `.mcp-servers.example.json` for all configuration options.
 
 ### **CLI Examples**
 
@@ -183,6 +218,26 @@ const result = await neurolink.generate({
 | CLI Usage          | ✅ Ready   | Command-line interface examples           |
 | SDK Integration    | ✅ Ready   | TypeScript/JavaScript SDK examples        |
 | External Tools     | 🔧 Coming  | Direct external tool execution (v1.8.0)   |
+
+## End-to-End Projects
+
+Complete, runnable example applications demonstrating NeuroLink integration patterns.
+
+| Project                                    | Description                             | Key Features                               |
+| ------------------------------------------ | --------------------------------------- | ------------------------------------------ |
+| [Chat Application](projects/chat-app/)     | Real-time chat with streaming responses | Streaming, Express, Provider selection     |
+| [MCP Tools Demo](projects/mcp-tools-demo/) | MCP tool integration examples           | Custom tools, External MCP, HTTP transport |
+| [Enterprise App](projects/enterprise-app/) | Production-ready enterprise patterns    | HITL, Redis memory, Audit logging, Docker  |
+
+### Running a Project
+
+```bash
+cd examples/projects/chat-app
+npm install
+cp .env.example .env
+# Add your API keys to .env
+npm run dev
+```
 
 ---
 

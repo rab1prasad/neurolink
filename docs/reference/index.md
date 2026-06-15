@@ -6,33 +6,16 @@ Complete reference documentation for NeuroLink configuration, troubleshooting, a
 
 This section provides comprehensive reference materials for advanced usage, configuration, and problem-solving.
 
-<div class="grid cards" markdown>
-
-- :material-help-circle: **[Troubleshooting](troubleshooting.md)**
-
-  ***
-
-  Common issues, error messages, and solutions for NeuroLink CLI and SDK usage.
-
-- :material-cog: **[Configuration](configuration.md)**
-
-  ***
-
-  Complete configuration reference including environment variables, provider settings, and optimization.
-
-- :material-compare: **[Provider Comparison](provider-comparison.md)**
-
-  ***
-
-  Detailed comparison of all 9 supported AI providers with features, costs, and recommendations.
-
-- :material-frequently-asked-questions: **[FAQ](faq.md)**
-
-  ***
-
-  Frequently asked questions about NeuroLink features, limitations, and best practices.
-
-</div>
+- **[Troubleshooting](troubleshooting.md)** — Common issues, error messages, and solutions for NeuroLink CLI and SDK usage.
+- **[Configuration](configuration.md)** — Complete configuration reference including environment variables, provider settings, and optimization.
+- **[Provider Capabilities Audit](provider-capabilities-audit.md)** — Comprehensive audit of all 21+ provider implementations with capability matrices and configuration examples.
+- **[Provider Comparison](provider-comparison.md)** — Detailed comparison of all 21+ supported AI providers with features, costs, and recommendations.
+- **[FAQ](faq.md)** — Frequently asked questions about NeuroLink features, limitations, and best practices.
+- **[Error Codes](error-codes.md)** — Complete error code reference with categorized codes, severity levels, and resolution guidance.
+- **[Analytics](analytics.md)** — Comprehensive guide to NeuroLink analytics, metrics, token tracking, cost monitoring, and observability integration.
+- **[Telemetry Guide](../telemetry-guide.md)** — OTLP setup, exporter behavior, and the local OpenObserve workflow for the Claude proxy.
+- **[Server Configuration](./server-configuration.md)** — Configuration reference for server adapters including Hono, Express, Fastify, and Koa framework integration.
+- **[MCP Enhancements API](../features/mcp-enhancements.md#api-reference)** — API reference for MCP enhancements including ToolRouter, ToolCache, RequestBatcher, tool annotations, and elicitation protocol.
 
 ## 🔧 Quick Reference
 
@@ -85,6 +68,12 @@ neurolink config init              # Interactive setup
 neurolink mcp discover             # Find available servers
 neurolink mcp list                 # List installed servers
 neurolink mcp install <server>     # Install MCP server
+
+# Claude proxy + local telemetry
+neurolink proxy setup
+neurolink proxy status --format json
+neurolink proxy telemetry setup
+neurolink proxy telemetry status
 ```
 
 ### SDK Quick Reference
@@ -120,14 +109,21 @@ const result = await neurolink.generate({
 
 ## 📊 Provider Comparison Matrix
 
-| Feature          | OpenAI | Google AI | Anthropic | Bedrock | Azure | Vertex | HuggingFace | Ollama | Mistral |
-| ---------------- | ------ | --------- | --------- | ------- | ----- | ------ | ----------- | ------ | ------- |
-| **Free Tier**    | ❌     | ✅        | ❌        | ❌      | ❌    | ❌     | ✅          | ✅     | ✅      |
-| **Tool Support** | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ⚠️          | ⚠️     | ✅      |
-| **Streaming**    | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ✅          | ✅     | ✅      |
-| **Vision**       | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ✅          | ⚠️     | ❌      |
-| **Local**        | ❌     | ❌        | ❌        | ❌      | ❌    | ❌     | ❌          | ✅     | ❌      |
-| **Enterprise**   | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ⚠️          | ✅     | ✅      |
+**Quick Overview** (see [Provider Capabilities Audit](provider-capabilities-audit.md) for complete details):
+
+| Feature          | OpenAI | Google AI | Anthropic | Bedrock | Azure | Vertex | HuggingFace | Ollama | Mistral | LiteLLM | SageMaker | OpenRouter | OpenAI Compat |
+| ---------------- | ------ | --------- | --------- | ------- | ----- | ------ | ----------- | ------ | ------- | ------- | --------- | ---------- | ------------- |
+| **Free Tier**    | ❌     | ✅        | ❌        | ❌      | ❌    | ❌     | ✅          | ✅     | ✅      | Varies  | ❌        | Varies     | Varies        |
+| **Tool Support** | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ⚠️          | ⚠️     | ✅      | ✅      | ✅        | ✅         | ✅            |
+| **Streaming**    | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ✅          | ✅     | ✅      | ✅      | ✅        | ✅         | ✅            |
+| **Vision**       | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ✅          | ⚠️     | ❌      | ✅      | Varies    | ✅         | Varies        |
+| **Local**        | ❌     | ❌        | ❌        | ❌      | ❌    | ❌     | ❌          | ✅     | ❌      | ❌      | ❌        | ❌         | Varies        |
+| **Enterprise**   | ✅     | ✅        | ✅        | ✅      | ✅    | ✅     | ⚠️          | ✅     | ✅      | ✅      | ✅        | ✅         | Varies        |
+
+For detailed capability matrices, authentication requirements, and configuration examples, see:
+
+- **[Provider Capabilities Audit](provider-capabilities-audit.md)** - Technical implementation details
+- **[Provider Comparison](provider-comparison.md)** - Feature comparison and selection guide
 
 ## 🔍 Error Code Reference
 

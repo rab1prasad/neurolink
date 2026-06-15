@@ -2,19 +2,47 @@ import { nanoid } from "nanoid";
 import { NeuroLink } from "../neurolink.js";
 import type {
   ConversationMemoryConfig,
-  NeurolinkOptions,
-} from "../types/conversation.js";
+  LoopSessionState,
+  McpOutputStrategy,
+  NeurolinkConstructorConfig,
+  SessionVariableValue,
+} from "../types/index.js";
+
 import { buildObservabilityConfigFromEnv } from "../utils/observabilityHelpers.js";
 
-// Define a specific type for session variable values
-type SessionVariableValue = string | number | boolean;
+/**
+ * Build mcp.outputLimits config from environment variables.
+ * Reads NEUROLINK_MCP_OUTPUT_STRATEGY and NEUROLINK_MCP_MAX_OUTPUT_BYTES.
+ * Returns undefined when neither variable is set (no overhead).
+ */
+function buildMcpOutputLimitsFromEnv():
+  | { strategy: McpOutputStrategy; maxBytes?: number; warnBytes?: number }
+  | undefined {
+  const strategyRaw = process.env.NEUROLINK_MCP_OUTPUT_STRATEGY;
+  const maxBytesRaw = process.env.NEUROLINK_MCP_MAX_OUTPUT_BYTES;
+  const warnBytesRaw = process.env.NEUROLINK_MCP_WARN_OUTPUT_BYTES;
 
-interface LoopSessionState {
-  neurolinkInstance: NeuroLink;
-  sessionId: string;
-  isActive: boolean;
-  conversationMemoryConfig?: ConversationMemoryConfig;
-  sessionVariables: Record<string, SessionVariableValue>;
+  if (!strategyRaw && !maxBytesRaw) {
+    return undefined;
+  }
+
+  const strategy: McpOutputStrategy =
+    strategyRaw === "inline" || strategyRaw === "externalize"
+      ? strategyRaw
+      : "externalize"; // safe default when only maxBytes is set
+
+  const maxBytes = maxBytesRaw ? parseInt(maxBytesRaw, 10) : undefined;
+  const warnBytes = warnBytesRaw ? parseInt(warnBytesRaw, 10) : undefined;
+
+  return {
+    strategy,
+    ...(maxBytes !== undefined && Number.isFinite(maxBytes) && maxBytes >= 0
+      ? { maxBytes }
+      : {}),
+    ...(warnBytes !== undefined && Number.isFinite(warnBytes) && warnBytes >= 0
+      ? { warnBytes }
+      : {}),
+  };
 }
 
 export class GlobalSessionManager {
@@ -30,7 +58,7 @@ export class GlobalSessionManager {
 
   setLoopSession(config?: ConversationMemoryConfig): string {
     const sessionId = `NL_${nanoid()}`;
-    const neurolinkOptions: NeurolinkOptions = {};
+    const neurolinkOptions: NeurolinkConstructorConfig = {};
 
     if (config?.enabled) {
       neurolinkOptions.conversationMemory = {
@@ -44,6 +72,15 @@ export class GlobalSessionManager {
     const observabilityConfig = buildObservabilityConfigFromEnv();
     if (observabilityConfig) {
       neurolinkOptions.observability = observabilityConfig;
+    }
+
+    // Add MCP output limits from environment variables (CLI usage)
+    const mcpOutputLimits = buildMcpOutputLimitsFromEnv();
+    if (mcpOutputLimits) {
+      neurolinkOptions.mcp = {
+        ...neurolinkOptions.mcp,
+        outputLimits: mcpOutputLimits,
+      };
     }
 
     this.loopSession = {
@@ -142,9 +179,17 @@ export class GlobalSessionManager {
 
     // Create new NeuroLink with observability config from environment (CLI usage)
     const observabilityConfig = buildObservabilityConfigFromEnv();
-    return new NeuroLink(
-      observabilityConfig ? { observability: observabilityConfig } : undefined,
-    );
+    const mcpOutputLimits = buildMcpOutputLimitsFromEnv();
+
+    const options: NeurolinkConstructorConfig = {};
+    if (observabilityConfig) {
+      options.observability = observabilityConfig;
+    }
+    if (mcpOutputLimits) {
+      options.mcp = { outputLimits: mcpOutputLimits };
+    }
+
+    return new NeuroLink(Object.keys(options).length ? options : undefined);
   }
 
   getCurrentSessionId(): string | undefined {

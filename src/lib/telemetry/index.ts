@@ -1,10 +1,21 @@
 // Optional Telemetry Infrastructure (Phase 2)
-export { TelemetryService, type HealthMetrics } from "./telemetryService.js";
+
+export { TelemetryService } from "./telemetryService.js";
+export { tracers } from "./tracers.js";
+
+export {
+  withSpan,
+  withClientSpan,
+  withStreamSpan,
+  withClientStreamSpan,
+} from "./withSpan.js";
+export { ATTR } from "./attributes.js";
 import { logger } from "../utils/logger.js";
 
 /**
  * Initialize telemetry for NeuroLink
- * OPTIONAL - Only works when NEUROLINK_TELEMETRY_ENABLED=true
+ * Reuses an existing global TracerProvider when one is already registered,
+ * otherwise bootstraps Neurolink telemetry when an exporter endpoint is configured.
  */
 export async function initializeTelemetry() {
   const { TelemetryService } = await import("./telemetryService.js");

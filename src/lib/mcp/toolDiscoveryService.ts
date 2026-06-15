@@ -8,24 +8,106 @@ import { EventEmitter } from "events";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { mcpLogger } from "../utils/logger.js";
-import { globalCircuitBreakerManager } from "./mcpCircuitBreaker.js";
+import {
+  globalCircuitBreakerManager,
+  CircuitBreakerOpenError,
+} from "./mcpCircuitBreaker.js";
 import type {
   ExternalMCPToolInfo,
   ExternalMCPToolResult,
-} from "../types/externalMcp.js";
-import type {
   MCPServerInfo,
   ToolDiscoveryResult,
   ExternalToolExecutionOptions,
   ToolValidationResult,
   ToolRegistryEvents,
-} from "../types/mcpTypes.js";
-import type { JsonObject, JsonValue } from "../types/common.js";
+  JsonObject,
+  JsonValue,
+} from "../types/index.js";
 import { isObject, isNullish } from "../utils/typeUtils.js";
 import {
   validateToolName,
   validateToolDescription,
 } from "../utils/parameterValidation.js";
+import { withTimeout } from "../utils/errorHandling.js";
+import { extractMcpErrorText } from "../utils/mcpErrorText.js";
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { tracers } from "../telemetry/tracers.js";
+import { withSpan } from "../telemetry/withSpan.js";
+import type { McpOutputNormalizer } from "./mcpOutputNormalizer.js";
+
+const mcpTracer = tracers.mcp;
+
+/**
+ * JSON-stringify a value for a Langfuse input/output preview attribute,
+ * truncated to a hard cap to stay under span attribute size limits. The
+ * returned string is guaranteed to be ≤ maxLen characters; when truncated,
+ * the last character is replaced with an ellipsis.
+ */
+function safeJsonStringify(value: unknown, maxLen: number): string {
+  if (maxLen <= 0) {
+    return "";
+  }
+  try {
+    const str = JSON.stringify(value);
+    if (typeof str !== "string") {
+      return "";
+    }
+    if (str.length <= maxLen) {
+      return str;
+    }
+    return str.slice(0, Math.max(0, maxLen - 1)) + "…";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Match property names that commonly hold secrets. Values under these keys
+ * are replaced with `[REDACTED]` before serialization. Case-insensitive.
+ * Conservative list — anything matching *here* is masked; the rest of the
+ * structure is preserved so Langfuse still gets a meaningful preview.
+ */
+const SENSITIVE_KEY_PATTERN =
+  /^(password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|authorization|auth|bearer|credential|cookie|session[_-]?id|private[_-]?key|client[_-]?secret|refresh[_-]?token|x-api-key)$/i;
+
+/**
+ * Walk a value, producing a structurally-equivalent copy with sensitive-key
+ * values masked. Unlike `transformParamsForLogging` (which collapses objects
+ * to a "N params" string), this preserves non-sensitive content so Langfuse
+ * input/output previews stay useful. Bounded depth guards against cycles.
+ */
+function redactForPreview(value: unknown, depth = 0): unknown {
+  if (depth > 10) {
+    return "[...]";
+  }
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => redactForPreview(v, depth + 1));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_PATTERN.test(k)) {
+      out[k] = "[REDACTED]";
+    } else {
+      out[k] = redactForPreview(v, depth + 1);
+    }
+  }
+  return out;
+}
+
+/**
+ * Default timeout for MCP tool execution operations in milliseconds.
+ * Configurable via MCP_TOOL_TIMEOUT env var.
+ */
+const DEFAULT_TOOL_TIMEOUT = Math.max(
+  5000,
+  Number(process.env.MCP_TOOL_TIMEOUT) || 60000,
+);
 
 /**
  * ToolDiscoveryService
@@ -37,8 +119,21 @@ export class ToolDiscoveryService extends EventEmitter {
   private serverTools = new Map<string, Set<string>>();
   private discoveryInProgress = new Set<string>();
 
+  /** Optional normalizer applied to every tool output before it is returned. */
+  private outputNormalizer?: McpOutputNormalizer;
+
   constructor() {
     super();
+  }
+
+  /**
+   * Attach a McpOutputNormalizer.
+   * When set, every raw callTool() result is passed through the normalizer
+   * before being returned. Oversized outputs are replaced with compact
+   * surrogates according to the configured strategy.
+   */
+  setOutputNormalizer(normalizer: McpOutputNormalizer): void {
+    this.outputNormalizer = normalizer;
   }
 
   /**
@@ -47,98 +142,117 @@ export class ToolDiscoveryService extends EventEmitter {
   async discoverTools(
     serverId: string,
     client: Client,
-    timeout = 10000,
+    timeout = DEFAULT_TOOL_TIMEOUT,
   ): Promise<ToolDiscoveryResult> {
-    const startTime = Date.now();
+    return withSpan(
+      {
+        name: "neurolink.mcp.discoverTools",
+        tracer: tracers.mcp,
+        attributes: { "mcp.server_id": serverId },
+      },
+      async (span) => {
+        const startTime = Date.now();
 
-    try {
-      // Prevent concurrent discovery for same server
-      if (this.discoveryInProgress.has(serverId)) {
-        return {
-          success: false,
-          error: `Discovery already in progress for server: ${serverId}`,
-          toolCount: 0,
-          tools: [],
-          duration: Date.now() - startTime,
-          serverId,
-        };
-      }
+        try {
+          // Prevent concurrent discovery for same server
+          if (this.discoveryInProgress.has(serverId)) {
+            return {
+              success: false,
+              error: `Discovery already in progress for server: ${serverId}`,
+              toolCount: 0,
+              tools: [],
+              duration: Date.now() - startTime,
+              serverId,
+            };
+          }
 
-      this.discoveryInProgress.add(serverId);
+          this.discoveryInProgress.add(serverId);
 
-      mcpLogger.info(
-        `[ToolDiscoveryService] Starting tool discovery for server: ${serverId}`,
-      );
+          mcpLogger.info(
+            `[ToolDiscoveryService] Starting tool discovery for server: ${serverId}`,
+          );
 
-      // Create circuit breaker for tool discovery
-      const circuitBreaker = globalCircuitBreakerManager.getBreaker(
-        `tool-discovery-${serverId}`,
-        {
-          failureThreshold: 2,
-          resetTimeout: 60000,
-          operationTimeout: timeout,
-        },
-      );
+          // Create circuit breaker for tool discovery
+          const circuitBreaker = globalCircuitBreakerManager.getBreaker(
+            `tool-discovery-${serverId}`,
+            {
+              failureThreshold: 2,
+              resetTimeout: 60000,
+              operationTimeout: timeout,
+            },
+          );
 
-      // Discover tools with circuit breaker protection
-      const tools = await circuitBreaker.execute(async () => {
-        return await this.performToolDiscovery(serverId, client, timeout);
-      });
+          // Discover tools with circuit breaker protection
+          const tools = await circuitBreaker.execute(async () => {
+            return await this.performToolDiscovery(serverId, client, timeout);
+          });
 
-      // Register discovered tools
-      const registeredTools = await this.registerDiscoveredTools(
-        serverId,
-        tools,
-      );
+          // Register discovered tools
+          const registeredTools = await this.registerDiscoveredTools(
+            serverId,
+            tools,
+          );
 
-      const result: ToolDiscoveryResult = {
-        success: true,
-        toolCount: registeredTools.length,
-        tools: registeredTools,
-        duration: Date.now() - startTime,
-        serverId,
-      };
+          span.setAttribute("mcp.tools_discovered", registeredTools.length);
 
-      // Emit discovery completed event
-      this.emit("discoveryCompleted", {
-        serverId,
-        toolCount: registeredTools.length,
-        duration: result.duration,
-        timestamp: new Date(),
-      } satisfies ToolRegistryEvents["discoveryCompleted"]);
+          const result: ToolDiscoveryResult = {
+            success: true,
+            toolCount: registeredTools.length,
+            tools: registeredTools,
+            duration: Date.now() - startTime,
+            serverId,
+          };
 
-      mcpLogger.info(
-        `[ToolDiscoveryService] Discovery completed for ${serverId}: ${registeredTools.length} tools`,
-      );
+          // Emit discovery completed event
+          this.emit("discoveryCompleted", {
+            serverId,
+            toolCount: registeredTools.length,
+            duration: result.duration,
+            timestamp: new Date(),
+          } satisfies ToolRegistryEvents["discoveryCompleted"]);
 
-      return result;
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
+          mcpLogger.info(
+            `[ToolDiscoveryService] Discovery completed for ${serverId}: ${registeredTools.length} tools`,
+          );
 
-      mcpLogger.error(
-        `[ToolDiscoveryService] Discovery failed for ${serverId}:`,
-        error,
-      );
+          return result;
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
 
-      // Emit discovery failed event
-      this.emit("discoveryFailed", {
-        serverId,
-        error: errorMessage,
-        timestamp: new Date(),
-      } satisfies ToolRegistryEvents["discoveryFailed"]);
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: errorMessage,
+          });
+          span.recordException(
+            error instanceof Error ? error : new Error(errorMessage),
+          );
 
-      return {
-        success: false,
-        error: errorMessage,
-        toolCount: 0,
-        tools: [],
-        duration: Date.now() - startTime,
-        serverId,
-      };
-    } finally {
-      this.discoveryInProgress.delete(serverId);
-    }
+          mcpLogger.error(
+            `[ToolDiscoveryService] Discovery failed for ${serverId}:`,
+            error,
+          );
+
+          // Emit discovery failed event
+          this.emit("discoveryFailed", {
+            serverId,
+            error: errorMessage,
+            timestamp: new Date(),
+          } satisfies ToolRegistryEvents["discoveryFailed"]);
+
+          return {
+            success: false,
+            error: errorMessage,
+            toolCount: 0,
+            tools: [],
+            duration: Date.now() - startTime,
+            serverId,
+          };
+        } finally {
+          this.discoveryInProgress.delete(serverId);
+        }
+      },
+    );
   }
 
   /**
@@ -466,29 +580,128 @@ export class ToolDiscoveryService extends EventEmitter {
       );
 
       // Create circuit breaker for tool execution
+      const effectiveTimeout = options.timeout || DEFAULT_TOOL_TIMEOUT;
       const circuitBreaker = globalCircuitBreakerManager.getBreaker(
         `tool-execution-${serverId}-${toolName}`,
         {
           failureThreshold: 3,
           resetTimeout: 30000,
-          operationTimeout: options.timeout || 30000,
+          operationTimeout: effectiveTimeout,
         },
       );
 
       // Execute tool with circuit breaker protection
       const result = await circuitBreaker.execute(async () => {
-        const timeout = options.timeout || 30000;
-        const executePromise = client.callTool({
-          name: toolName,
-          arguments: parameters,
-        });
+        return mcpTracer.startActiveSpan(
+          "neurolink.mcp.callTool",
+          {
+            kind: SpanKind.CLIENT,
+            attributes: {
+              "mcp.server_id": serverId,
+              "mcp.tool_name": toolName,
+              "mcp.timeout_ms": effectiveTimeout,
+              // Curator P1-4: Langfuse observations rely on ai.*/gen_ai.*
+              // attributes for tool name and I/O previews. Provide them so
+              // the SPAN observation in Langfuse is legible without
+              // timestamp-joining against the parent ai.toolCall. Redact
+              // parameters via the existing secret-stripping helper so
+              // tokens/credentials/paths don't leave the process.
+              "ai.tool.name": toolName,
+              "gen_ai.tool.name": toolName,
+              "gen_ai.request": safeJsonStringify(
+                {
+                  name: toolName,
+                  arguments: redactForPreview(parameters),
+                },
+                2048,
+              ),
+            },
+          },
+          async (callSpan) => {
+            try {
+              const timeout = effectiveTimeout;
+              const callResult = await withTimeout(
+                client.callTool({
+                  name: toolName,
+                  arguments: parameters,
+                }),
+                timeout,
+                new Error(`Tool execution timeout: ${toolName}`),
+              );
+              // Curator P0-1/P0-2: the MCP client does NOT throw on protocol
+              // errors — it returns { isError: true, content: [...] }. Detect
+              // that pattern so the span status reflects reality.
+              const resultObj = callResult as {
+                isError?: unknown;
+                content?: unknown;
+              } | null;
+              if (resultObj && resultObj.isError === true) {
+                const errorText = extractMcpErrorText(resultObj);
+                callSpan.setStatus({
+                  code: SpanStatusCode.ERROR,
+                  message: errorText || `Tool ${toolName} returned isError`,
+                });
+              } else {
+                callSpan.setStatus({ code: SpanStatusCode.OK });
+              }
 
-        const timeoutPromise = this.createTimeoutPromise<never>(
-          timeout,
-          `Tool execution timeout: ${toolName}`,
+              // ── MCP output normalization ──────────────────────────────────
+              // Intercept here — after receive, before cache, before memory,
+              // before LLM context injection. Returns a compact surrogate when
+              // the payload exceeds mcp.outputLimits.maxBytes.
+              let resultForPreview: unknown = callResult;
+              let resultForReturn: unknown = callResult;
+              if (this.outputNormalizer) {
+                try {
+                  const normalized = await this.outputNormalizer.normalize(
+                    callResult,
+                    { toolName, serverId },
+                  );
+                  callSpan.setAttribute(
+                    "mcp.output.strategy",
+                    normalized.isExternalized ? "externalize" : "inline",
+                  );
+                  if (normalized.isExternalized) {
+                    callSpan.setAttribute(
+                      "mcp.output.original_bytes",
+                      normalized.originalBytes,
+                    );
+                  }
+                  resultForPreview = normalized.result;
+                  resultForReturn = normalized.result;
+                } catch (normErr) {
+                  mcpLogger.warn(
+                    `[ToolDiscoveryService] McpOutputNormalizer failed for ` +
+                      `${toolName}: ${normErr instanceof Error ? normErr.message : String(normErr)} ` +
+                      `— returning raw result`,
+                  );
+                }
+              }
+              // ── end normalization ─────────────────────────────────────────
+
+              // Curator P1-4: build gen_ai.response AFTER normalization so
+              // large payloads use the compact surrogate instead of the raw
+              // result (avoids redundant stringify + memory hit on payloads
+              // that were specifically externalized to Redis). Redact via the
+              // same secret-stripping path used for request parameters.
+              callSpan.setAttribute(
+                "gen_ai.response",
+                safeJsonStringify(redactForPreview(resultForPreview), 2048),
+              );
+
+              return resultForReturn;
+            } catch (err) {
+              callSpan.setStatus({
+                code: SpanStatusCode.ERROR,
+                message: (err as Error).message,
+              });
+              callSpan.recordException(err as Error);
+              throw err;
+            } finally {
+              callSpan.end();
+            }
+          },
         );
-
-        return await Promise.race([executePromise, timeoutPromise]);
       });
 
       const duration = Date.now() - startTime;
@@ -505,7 +718,7 @@ export class ToolDiscoveryService extends EventEmitter {
         `[ToolDiscoveryService] Tool execution completed: ${toolName}`,
         {
           duration,
-          hasContent: !!result.content,
+          hasContent: !!(result as { content?: unknown })?.content,
         },
       );
 
@@ -527,6 +740,53 @@ export class ToolDiscoveryService extends EventEmitter {
       // Update tool statistics
       const toolKey = this.createToolKey(serverId, toolName);
       this.updateToolStats(toolKey, false, duration);
+
+      // Circuit breaker open errors: return a structured isError result with
+      // actionable details so AI models understand the tool is temporarily
+      // unavailable and should NOT retry until the cooldown expires.
+      if (error instanceof CircuitBreakerOpenError) {
+        mcpLogger.warn(
+          `[ToolDiscoveryService] Tool blocked by circuit breaker: ${toolName} on ${serverId}`,
+          {
+            breakerState: error.breakerState,
+            retryAfter: error.retryAfter,
+            retryAfterMs: error.retryAfterMs,
+            failureCount: error.failureCount,
+          },
+        );
+
+        return {
+          success: false,
+          error: error.message,
+          data: {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `TOOL TEMPORARILY UNAVAILABLE: "${toolName}" has been disabled after ` +
+                  `${error.failureCount} failures. ` +
+                  `This is a circuit breaker protection — do NOT retry this tool. ` +
+                  `It will become available again after ${Math.ceil(error.retryAfterMs / 1000)} seconds ` +
+                  `(at ${error.retryAfter}). ` +
+                  `Instead, inform the user that the operation failed and suggest trying again later.`,
+              },
+            ],
+          },
+          duration,
+          metadata: {
+            toolName,
+            serverId,
+            timestamp: Date.now(),
+            circuitBreaker: {
+              state: error.breakerState,
+              retryAfter: error.retryAfter,
+              retryAfterMs: error.retryAfterMs,
+              failureCount: error.failureCount,
+            },
+          },
+        };
+      }
 
       mcpLogger.error(
         `[ToolDiscoveryService] Tool execution failed: ${toolName}`,
@@ -865,6 +1125,70 @@ export class ToolDiscoveryService extends EventEmitter {
         reject(new Error(message));
       }, timeout);
     });
+  }
+
+  /**
+   * Destroy the tool discovery service and clean up all resources
+   * This method should be called when the service is no longer needed
+   * to prevent memory leaks from accumulated event listeners
+   *
+   * @example
+   * ```typescript
+   * const service = new ToolDiscoveryService();
+   * // ... use the service ...
+   * service.destroy(); // Clean up when done
+   * ```
+   */
+  destroy(): void {
+    mcpLogger.debug("[ToolDiscoveryService] Starting cleanup...");
+
+    // Clear all event listeners to prevent memory leaks
+    this.removeAllListeners();
+
+    // Clear all internal data structures
+    this.serverToolStorage.clear();
+    this.toolRegistry.clear();
+    this.serverTools.clear();
+    this.discoveryInProgress.clear();
+
+    mcpLogger.debug("[ToolDiscoveryService] Destroyed and cleaned up");
+  }
+
+  /**
+   * Reset statistics for all tools
+   * This clears execution counts, timing data, and other statistics
+   * while preserving the tool registrations themselves
+   */
+  resetStatistics(): void {
+    for (const toolInfo of this.toolRegistry.values()) {
+      toolInfo.stats = {
+        totalCalls: 0,
+        successfulCalls: 0,
+        failedCalls: 0,
+        averageExecutionTime: 0,
+        lastExecutionTime: 0,
+      };
+      toolInfo.lastCalled = undefined;
+    }
+    mcpLogger.debug("[ToolDiscoveryService] Statistics reset for all tools");
+  }
+
+  /**
+   * Get the count of active event listeners
+   * Useful for monitoring potential memory leaks
+   */
+  getListenerCount(): number {
+    const events = [
+      "discoveryCompleted",
+      "discoveryFailed",
+      "toolRegistered",
+      "toolUnregistered",
+    ];
+    let total = 0;
+    for (const event of events) {
+      total += this.listenerCount(event);
+    }
+    return total;
   }
 
   /**

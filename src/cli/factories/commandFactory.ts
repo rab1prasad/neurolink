@@ -1,46 +1,91 @@
-import type { CommandModule, Argv } from "yargs";
-import { globalSession } from "../../lib/session/globalSessionState.js";
-import type { JsonValue } from "../../lib/types/common.js";
+import fs from "node:fs";
+import path from "node:path";
+import chalk from "chalk";
+import ora from "ora";
+import type { Argv, CommandModule } from "yargs";
+import { ModelResolver } from "../../lib/models/modelResolver.js";
 import type {
+  ChunkingStrategy,
+  JsonValue,
+  AnalyticsData,
+  TokenUsage,
+  BaseCommandArgs,
+  BatchCommandArgs,
+  GenerateCommandArgs,
+  CliGenerateResult,
+  StreamCommandArgs,
   ConversationMemoryConfig,
   ConversationSummary,
-} from "../../lib/types/conversation.js";
-import type {
-  BaseCommandArgs,
-  GenerateCommandArgs,
-  StreamCommandArgs,
-  BatchCommandArgs,
-  GenerateResult,
-} from "../../lib/types/cli.js";
-import type { TokenUsage, AnalyticsData } from "../../lib/types/index.js";
-import { configManager } from "../commands/config.js";
-import { handleError } from "../errorHandler.js";
-import { normalizeEvaluationData } from "../../lib/utils/evaluationUtils.js";
-import { LoopSession } from "../loop/session.js";
-import { initializeCliParser } from "../parser.js";
-
+  AnthropicAuthConfig,
+  AnthropicAuthMethod,
+  ClaudeSubscriptionTier,
+} from "../../lib/types/index.js";
+import { globalSession } from "../../lib/session/globalSessionState.js";
 // Use TokenUsage from standard types - no local interface needed
 import {
-  ContextFactory,
   type BaseContext,
   type ContextConfig,
-} from "../../lib/types/contextTypes.js";
-import { ModelsCommandFactory } from "../commands/models.js";
+  ContextFactory,
+} from "../../lib/types/index.js";
+import { checkRedisAvailability } from "../../lib/utils/conversationMemory.js";
+import { normalizeEvaluationData } from "../../lib/utils/evaluationUtils.js";
+import { logger } from "../../lib/utils/logger.js";
+import { createThinkingConfigFromRecord } from "../../lib/utils/thinkingConfig.js";
+import { configManager } from "../commands/config.js";
 import { MCPCommandFactory } from "../commands/mcp.js";
+import { ModelsCommandFactory } from "../commands/models.js";
+import { handleSetup } from "../commands/setup.js";
+import { handleError } from "../errorHandler.js";
+import { LoopSession } from "../loop/session.js";
+import { initializeCliParser } from "../parser.js";
+import { formatFileSize, saveAudioToFile } from "../utils/audioFileUtils.js";
+import { resolveFilePaths } from "../utils/pathResolver.js";
+import { animatedWrite } from "../utils/typewriter.js";
+import { createStreamAbortHandler } from "../utils/abortHandler.js";
+import {
+  formatVideoFileSize,
+  getVideoMetadataSummary,
+  saveVideoToFile,
+} from "../utils/videoFileUtils.js";
 import { OllamaCommandFactory } from "./ollamaCommandFactory.js";
 import { SageMakerCommandFactory } from "./sagemakerCommandFactory.js";
-import ora from "ora";
-import chalk from "chalk";
-import { logger } from "../../lib/utils/logger.js";
-import fs from "fs";
-import { handleSetup } from "../commands/setup.js";
-import { checkRedisAvailability } from "../../lib/utils/conversationMemoryUtils.js";
-import { saveAudioToFile, formatFileSize } from "../utils/audioFileUtils.js";
 
 /**
  * CLI Command Factory for generate commands
  */
 export class CLICommandFactory {
+  /**
+   * Normalize loop session variables before merging them into provider options.
+   *
+   * The CLI loop schema models some fields (e.g. `stopSequences`,
+   * `enabledToolNames`) as a single comma-separated string for ergonomic
+   * input, but providers expect `string[]`. Without conversion,
+   * `set stopSequences a,b` would be sent as one stop token "a,b" instead
+   * of two ("a", "b"); `set enabledToolNames read,write` would be cast to
+   * a `string[]` containing the single literal "read,write" and silently
+   * filter out every tool. This helper splits and trims those fields so
+   * the spread into `enhancedOptions` produces the correct shape across
+   * generate / batch / stream paths.
+   */
+  private static normalizeLoopSessionVariables(
+    vars: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const normalized: Record<string, unknown> = { ...vars };
+    if (typeof normalized.stopSequences === "string") {
+      normalized.stopSequences = normalized.stopSequences
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    if (typeof normalized.enabledToolNames === "string") {
+      normalized.enabledToolNames = normalized.enabledToolNames
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return normalized;
+  }
+
   // Common options available on all commands
   private static readonly commonOptions = {
     // Core generation options
@@ -49,10 +94,13 @@ export class CLICommandFactory {
         "auto",
         "openai",
         "openai-compatible",
+        "openrouter",
+        "or",
         "bedrock",
         "vertex",
         "googleVertex",
         "anthropic",
+        "anthropic-subscription", // Anthropic with subscription tier support
         "azure",
         "google-ai",
         "google-ai-studio",
@@ -61,10 +109,64 @@ export class CLICommandFactory {
         "mistral",
         "litellm",
         "sagemaker",
+        "deepseek",
+        "ds",
+        "nvidia-nim",
+        "nim",
+        "nvidia",
+        "lm-studio",
+        "lmstudio",
+        "lms",
+        "llamacpp",
+        "llama.cpp",
+        "xai",
+        "grok",
+        "groq",
+        "cohere",
+        "together-ai",
+        "together",
+        "fireworks",
+        "perplexity",
+        "pplx",
+        "cloudflare",
+        "workers-ai",
+        "cf-ai",
+        "replicate",
+        "voyage",
+        "voyage-ai",
+        "jina",
+        "jina-ai",
+        "stability",
+        "stability-ai",
+        "sd",
+        "ideogram",
+        "recraft",
       ],
       default: "auto",
-      description: "AI provider to use (auto-selects best available)",
+      description:
+        "AI provider to use (auto-selects best available). Use 'anthropic-subscription' for Claude subscription plans.",
       alias: "p",
+    },
+    // Anthropic subscription options
+    authMethod: {
+      type: "string" as const,
+      choices: ["api-key", "oauth"],
+      default: "api-key",
+      description:
+        "Authentication method for Anthropic: 'api-key' (default) or 'oauth' (for subscription plans)",
+    },
+    subscriptionTier: {
+      type: "string" as const,
+      choices: ["free", "pro", "max", "max_5", "max_20", "api"],
+      description:
+        "Anthropic subscription tier: free (limited), pro ($20/mo), max (highest limits), max_5/max_20 (extended), api (pay-per-use)",
+    },
+    enableBeta: {
+      type: "boolean" as const,
+      default: false,
+      description:
+        "Enable Anthropic beta features (experimental capabilities, computer use, etc.)",
+      alias: "beta",
     },
     image: {
       type: "string" as const,
@@ -122,7 +224,11 @@ export class CLICommandFactory {
       type: "string" as const,
       choices: ["raw", "markdown", "json"],
       default: "raw",
-      description: "CSV output format (raw recommended for large files)",
+      description:
+        "CSV output format:\n" +
+        "  • raw: Plain CSV text (fastest, minimal tokens, best for large files)\n" +
+        "  • markdown: Formatted table (readable, best for small files <100 rows)\n" +
+        "  • json: Structured JSON array (best for programmatic use, higher tokens)",
     },
     model: {
       type: "string" as const,
@@ -159,6 +265,12 @@ export class CLICommandFactory {
       type: "string" as const,
       description: "Save output to file",
       alias: "o",
+    },
+    imageOutput: {
+      type: "string" as const,
+      description:
+        "Custom path for generated image (default: generated-images/image-<timestamp>.png)",
+      alias: "image-output",
     },
 
     // Behavior control options
@@ -262,9 +374,25 @@ export class CLICommandFactory {
       type: "string" as const,
       description: "TTS voice to use (e.g., 'en-US-Neural2-C')",
     },
+    ttsProvider: {
+      type: "string" as const,
+      choices: ["google-ai", "vertex", "openai-tts", "elevenlabs", "azure-tts"],
+      description: "TTS provider (overrides --provider for speech synthesis)",
+    },
     ttsFormat: {
       type: "string" as const,
-      choices: ["mp3", "wav", "ogg", "opus"],
+      choices: [
+        "mp3",
+        "wav",
+        "ogg",
+        "opus",
+        "m4a",
+        "flac",
+        "webm",
+        "mp4",
+        "mpeg",
+        "mpga",
+      ],
       default: "mp3",
       description: "Audio output format",
     },
@@ -289,14 +417,270 @@ export class CLICommandFactory {
       default: false,
       description: "Auto-play generated audio",
     },
+
+    // STT (Speech-to-Text) options
+    stt: {
+      type: "boolean" as const,
+      default: false,
+      description: "Enable speech-to-text transcription of input audio",
+    },
+    sttProvider: {
+      type: "string" as const,
+      choices: ["whisper", "deepgram", "google-stt", "azure-stt"],
+      description: "STT provider to use",
+    },
+    sttLanguage: {
+      type: "string" as const,
+      description: "Audio language code for STT (e.g., en-US)",
+    },
+    inputAudio: {
+      type: "string" as const,
+      description: "Path to audio file for STT transcription",
+    },
+
+    // Video Generation options (Veo 3.1, Kling, Runway, Replicate)
+    outputMode: {
+      type: "string" as const,
+      choices: ["text", "video", "ppt", "avatar", "music"],
+      default: "text",
+      description:
+        "Output mode: 'text' (default), 'video' (Veo/Kling/Runway/Replicate), 'ppt' (presentation), 'avatar' (D-ID/HeyGen/MuseTalk talking-head), 'music' (Beatoven/ElevenLabs/Lyria/MusicGen)",
+    },
+    videoProvider: {
+      type: "string" as const,
+      description:
+        "Video provider override (e.g., 'vertex' (default), 'kling', 'runway', 'replicate')",
+    },
+    videoOutput: {
+      type: "string" as const,
+      alias: "vo",
+      description: "Path to save generated video file (e.g., ./output.mp4)",
+    },
+    videoResolution: {
+      type: "string" as const,
+      choices: ["720p", "1080p"],
+      description:
+        "Video output resolution (720p or 1080p; provider default applied if omitted)",
+    },
+    videoLength: {
+      type: "number" as const,
+      choices: [4, 6, 8],
+      description:
+        "Video duration in seconds (4, 6, or 8; provider default applied if omitted)",
+    },
+    videoAspectRatio: {
+      type: "string" as const,
+      choices: ["9:16", "16:9"],
+      description:
+        "Video aspect ratio (9:16 for portrait, 16:9 for landscape; provider default applied if omitted)",
+    },
+    videoAudio: {
+      type: "boolean" as const,
+      description:
+        "Enable/disable audio generation in video (provider default applied if omitted)",
+    },
+
+    // Avatar Generation options (D-ID, HeyGen, MuseTalk via Replicate)
+    avatarProvider: {
+      type: "string" as const,
+      description:
+        "Avatar provider (e.g., 'd-id' (default), 'heygen', 'replicate', 'musetalk')",
+    },
+    avatarImage: {
+      type: "string" as const,
+      description:
+        "Path to source portrait image (or HeyGen avatar id when --avatarProvider heygen)",
+    },
+    avatarAudio: {
+      type: "string" as const,
+      description: "Path to narration audio (alternative to --avatarText)",
+    },
+    avatarText: {
+      type: "string" as const,
+      description:
+        "Text the avatar should speak (the provider runs TTS internally)",
+    },
+    avatarVoice: {
+      type: "string" as const,
+      description:
+        "Voice id for TTS-driven avatars (provider-specific catalog id)",
+    },
+    avatarQuality: {
+      type: "string" as const,
+      choices: ["standard", "hd"],
+      description:
+        "Avatar output quality preset (provider default applied if omitted)",
+    },
+    avatarFormat: {
+      type: "string" as const,
+      choices: ["mp4", "webm", "mov"],
+      description:
+        "Avatar video output format (provider default applied if omitted)",
+    },
+    avatarOutput: {
+      type: "string" as const,
+      description: "Path to save generated avatar video (e.g., ./avatar.mp4)",
+    },
+
+    // Music Generation options (Beatoven, ElevenLabs, Lyria, MusicGen via Replicate)
+    musicProvider: {
+      type: "string" as const,
+      description:
+        "Music provider (e.g., 'beatoven' (default), 'elevenlabs-music', 'lyria', 'replicate', 'musicgen')",
+    },
+    musicDuration: {
+      type: "number" as const,
+      description: "Music duration in seconds (provider-clamped)",
+    },
+    musicFormat: {
+      type: "string" as const,
+      choices: ["mp3", "wav", "flac", "ogg"],
+      description: "Music output format",
+    },
+    musicGenre: {
+      type: "string" as const,
+      description:
+        "Music genre hint (e.g., 'ambient', 'cinematic', 'electronic')",
+    },
+    musicMood: {
+      type: "string" as const,
+      description:
+        "Music mood hint (e.g., 'uplifting', 'tense', 'melancholic')",
+    },
+    musicTempo: {
+      type: "number" as const,
+      description: "Music tempo in BPM",
+    },
+    musicOutput: {
+      type: "string" as const,
+      description: "Path to save generated music (e.g., ./track.mp3)",
+    },
+
+    // PPT Generation options
+    pptPages: {
+      type: "number" as const,
+      alias: "pages",
+      description:
+        "Number of slides to generate (5-50, default: 10 when PPT mode is enabled)",
+    },
+    pptTheme: {
+      type: "string" as const,
+      choices: ["modern", "corporate", "creative", "minimal", "dark"],
+      description:
+        "Presentation theme/style (default: AI selects based on topic)",
+    },
+    pptAudience: {
+      type: "string" as const,
+      choices: ["business", "students", "technical", "general"],
+      description: "Target audience (default: AI selects based on topic)",
+    },
+    pptTone: {
+      type: "string" as const,
+      choices: ["professional", "casual", "educational", "persuasive"],
+      description: "Presentation tone (default: AI selects based on topic)",
+    },
+    pptOutput: {
+      type: "string" as const,
+      alias: "po",
+      description: "Path to save generated PPTX file (e.g., ./output.pptx)",
+    },
+    pptAspectRatio: {
+      type: "string" as const,
+      choices: ["16:9", "4:3"],
+      description:
+        "Slide aspect ratio (default: 16:9 when PPT mode is enabled)",
+    },
+    pptNoImages: {
+      type: "boolean" as const,
+      default: false,
+      description: "Disable AI image generation for slides",
+    },
+
+    thinking: {
+      alias: "think",
+      type: "boolean" as const,
+      description: "Enable extended thinking/reasoning capability",
+      default: false,
+    },
+    thinkingBudget: {
+      type: "number" as const,
+      description:
+        "Token budget for extended thinking - Anthropic Claude and Gemini 2.5+ models (5000-100000)",
+      default: 10000,
+    },
+    thinkingLevel: {
+      type: "string" as const,
+      description:
+        "Thinking level for extended reasoning (Anthropic Claude, Gemini 2.5+, Gemini 3): minimal, low, medium, high",
+      choices: ["minimal", "low", "medium", "high"] as const,
+    },
+    region: {
+      type: "string" as const,
+      description:
+        "Vertex AI region (e.g., us-central1, europe-west1, asia-northeast1)",
+      alias: "r",
+    },
+
+    // RAG options
+    ragFiles: {
+      type: "array" as const,
+      description:
+        "File paths to load for RAG (Retrieval-Augmented Generation). AI will search these documents to answer your question.",
+      alias: "rag-files",
+      string: true,
+    },
+    ragStrategy: {
+      type: "string" as const,
+      description:
+        "Chunking strategy for RAG documents (auto-detected from file extension if not specified)",
+      alias: "rag-strategy",
+      choices: [
+        "character",
+        "recursive",
+        "sentence",
+        "token",
+        "markdown",
+        "html",
+        "json",
+        "latex",
+        "semantic",
+        "semantic-markdown",
+      ] as const,
+    },
+    ragChunkSize: {
+      type: "number" as const,
+      description: "Maximum chunk size in characters for RAG documents",
+      alias: "rag-chunk-size",
+      default: 1000,
+    },
+    ragChunkOverlap: {
+      type: "number" as const,
+      description: "Overlap between adjacent chunks for RAG documents",
+      alias: "rag-chunk-overlap",
+      default: 200,
+    },
+    ragTopK: {
+      type: "number" as const,
+      description: "Number of top results to retrieve for RAG",
+      alias: "rag-top-k",
+      default: 5,
+    },
   };
 
   // Helper method to build options for commands
   private static buildOptions(yargs: Argv, additionalOptions = {}) {
-    return yargs.options({
-      ...this.commonOptions,
-      ...additionalOptions,
-    });
+    return (
+      yargs
+        .options({
+          ...CLICommandFactory.commonOptions,
+          ...additionalOptions,
+        })
+        // NEW9: implies relationships so users who pass --stt-provider or
+        // --input-audio without --stt get an actionable error from yargs
+        // instead of silently skipping STT.
+        .implies("sttProvider", "stt")
+        .implies("inputAudio", "stt")
+    );
   }
 
   // Helper method to process CLI images with smart auto-detection
@@ -309,10 +693,10 @@ export class CLICommandFactory {
 
     const imagePaths = Array.isArray(images) ? images : [images];
 
-    // Return as-is - let the smart message builder handle URL vs file detection
-    // URLs will be detected and appended to prompt text
+    // Resolve relative paths to absolute paths before returning
+    // URLs are preserved as-is by resolveFilePaths
     // File paths will be converted to base64 by the message builder
-    return imagePaths;
+    return resolveFilePaths(imagePaths);
   }
 
   // Helper method to process CLI CSV files
@@ -322,7 +706,10 @@ export class CLICommandFactory {
     if (!csvFiles) {
       return undefined;
     }
-    return Array.isArray(csvFiles) ? csvFiles : [csvFiles];
+    const paths = Array.isArray(csvFiles) ? csvFiles : [csvFiles];
+    // Resolve relative paths to absolute paths before returning
+    // URLs are preserved as-is by resolveFilePaths
+    return resolveFilePaths(paths);
   }
 
   // Helper method to process CLI PDF files
@@ -332,7 +719,10 @@ export class CLICommandFactory {
     if (!pdfFiles) {
       return undefined;
     }
-    return Array.isArray(pdfFiles) ? pdfFiles : [pdfFiles];
+    const paths = Array.isArray(pdfFiles) ? pdfFiles : [pdfFiles];
+    // Resolve relative paths to absolute paths before returning
+    // URLs are preserved as-is by resolveFilePaths
+    return resolveFilePaths(paths);
   }
 
   // Helper method to process CLI files with auto-detection
@@ -342,7 +732,10 @@ export class CLICommandFactory {
     if (!files) {
       return undefined;
     }
-    return Array.isArray(files) ? files : [files];
+    const paths = Array.isArray(files) ? files : [files];
+    // Resolve relative paths to absolute paths before returning
+    // URLs are preserved as-is by resolveFilePaths
+    return resolveFilePaths(paths);
   }
 
   // Helper method to process CLI video files
@@ -352,7 +745,63 @@ export class CLICommandFactory {
     if (!videoFiles) {
       return undefined;
     }
-    return Array.isArray(videoFiles) ? videoFiles : [videoFiles];
+    const paths = Array.isArray(videoFiles) ? videoFiles : [videoFiles];
+    // Resolve relative paths to absolute paths before returning
+    // URLs are preserved as-is by resolveFilePaths
+    return resolveFilePaths(paths);
+  }
+
+  private static isNonLocalFileReference(filePath: string): boolean {
+    const lower = filePath.toLowerCase();
+    return (
+      lower.startsWith("http://") ||
+      lower.startsWith("https://") ||
+      lower.startsWith("file://") ||
+      lower.startsWith("data:")
+    );
+  }
+
+  private static validateCliInputFiles(argv: Record<string, unknown>): void {
+    const fileArgs: Array<{
+      option: "--image" | "--csv" | "--pdf" | "--video" | "--file";
+      value?: string | string[];
+    }> = [
+      { option: "--image", value: argv.image as string | string[] | undefined },
+      { option: "--csv", value: argv.csv as string | string[] | undefined },
+      { option: "--pdf", value: argv.pdf as string | string[] | undefined },
+      { option: "--video", value: argv.video as string | string[] | undefined },
+      { option: "--file", value: argv.file as string | string[] | undefined },
+    ];
+
+    const missingPaths: string[] = [];
+
+    for (const { option, value } of fileArgs) {
+      if (!value) {
+        continue;
+      }
+
+      const rawPaths = Array.isArray(value) ? value : [value];
+      const resolvedPaths = resolveFilePaths(rawPaths);
+
+      for (let i = 0; i < resolvedPaths.length; i++) {
+        const resolvedPath = resolvedPaths[i];
+        if (CLICommandFactory.isNonLocalFileReference(resolvedPath)) {
+          continue;
+        }
+
+        if (!fs.existsSync(resolvedPath)) {
+          missingPaths.push(
+            `${option} path not found: ${rawPaths[i]} (resolved to ${resolvedPath})`,
+          );
+        }
+      }
+    }
+
+    if (missingPaths.length > 0) {
+      throw new Error(
+        `One or more input files do not exist:\n${missingPaths.join("\n")}`,
+      );
+    }
   }
 
   // Helper method to process common options
@@ -415,6 +864,13 @@ export class CLICommandFactory {
       model: argv.model as string | undefined,
       temperature: argv.temperature as number | undefined,
       maxTokens: argv.maxTokens as number | undefined,
+      // Sampling controls — surfaced here so all three command paths
+      // (generate / stream / batch) get them consistently typed instead
+      // of relying on an ad-hoc cast at each sdk call site.
+      topP: argv.topP as number | undefined,
+      topK: argv.topK as number | undefined,
+      stopSequences: argv.stopSequences as string[] | undefined,
+      enabledToolNames: argv.enabledToolNames as string[] | undefined,
       systemPrompt: argv.system as string | undefined,
       timeout: argv.timeout as number | undefined,
       disableTools: argv.disableTools as boolean | undefined,
@@ -430,6 +886,7 @@ export class CLICommandFactory {
       quiet: argv.quiet as boolean | undefined,
       format: argv.format as "text" | "json" | "table" | "yaml" | undefined,
       output: argv.output as string | undefined,
+      imageOutput: argv.imageOutput as string | undefined,
       delay: argv.delay as number | undefined,
       noColor: argv.noColor as boolean | undefined,
       configFile: argv.configFile as string | undefined,
@@ -437,17 +894,185 @@ export class CLICommandFactory {
       // TTS options
       tts: argv.tts as boolean | undefined,
       ttsVoice: argv.ttsVoice as string | undefined,
-      ttsFormat: argv.ttsFormat as "mp3" | "wav" | "ogg" | "opus" | undefined,
+      ttsProvider: argv.ttsProvider as string | undefined,
+      ttsFormat: argv.ttsFormat as
+        | import("../../lib/types/index.js").TTSAudioFormat
+        | undefined,
       ttsSpeed: argv.ttsSpeed as number | undefined,
       ttsQuality: argv.ttsQuality as "standard" | "hd" | undefined,
       ttsOutput: argv.ttsOutput as string | undefined,
       ttsPlay: argv.ttsPlay as boolean | undefined,
+      // STT options
+      stt: argv.stt as boolean | undefined,
+      sttProvider: argv.sttProvider as string | undefined,
+      sttLanguage: argv.sttLanguage as string | undefined,
+      inputAudio: argv.inputAudio as string | undefined,
+      // Video generation options (Veo 3.1)
+      outputMode: argv.outputMode as
+        | "text"
+        | "video"
+        | "ppt"
+        | "avatar"
+        | "music"
+        | undefined,
+      videoProvider: argv.videoProvider as string | undefined,
+      videoOutput: argv.videoOutput as string | undefined,
+      videoResolution: argv.videoResolution as "720p" | "1080p" | undefined,
+      videoLength: argv.videoLength as 4 | 6 | 8 | undefined,
+      videoAspectRatio: argv.videoAspectRatio as "9:16" | "16:9" | undefined,
+      videoAudio: argv.videoAudio as boolean | undefined,
+      // Avatar generation options
+      avatarProvider: argv.avatarProvider as string | undefined,
+      avatarImage: argv.avatarImage as string | undefined,
+      avatarAudio: argv.avatarAudio as string | undefined,
+      avatarText: argv.avatarText as string | undefined,
+      avatarVoice: argv.avatarVoice as string | undefined,
+      avatarQuality: argv.avatarQuality as "standard" | "hd" | undefined,
+      avatarFormat: argv.avatarFormat as "mp4" | "webm" | "mov" | undefined,
+      avatarOutput: argv.avatarOutput as string | undefined,
+      // Music generation options
+      musicProvider: argv.musicProvider as string | undefined,
+      musicDuration: argv.musicDuration as number | undefined,
+      musicFormat: argv.musicFormat as
+        | "mp3"
+        | "wav"
+        | "flac"
+        | "ogg"
+        | undefined,
+      musicGenre: argv.musicGenre as string | undefined,
+      musicMood: argv.musicMood as string | undefined,
+      musicTempo: argv.musicTempo as number | undefined,
+      musicOutput: argv.musicOutput as string | undefined,
+      // PPT generation options
+      pptPages: argv.pptPages as number | undefined,
+      pptTheme: argv.pptTheme as
+        | "modern"
+        | "corporate"
+        | "creative"
+        | "minimal"
+        | "dark"
+        | undefined,
+      pptAudience: argv.pptAudience as
+        | "business"
+        | "students"
+        | "technical"
+        | "general"
+        | undefined,
+      pptTone: argv.pptTone as
+        | "professional"
+        | "casual"
+        | "educational"
+        | "persuasive"
+        | undefined,
+      pptOutput: argv.pptOutput as string | undefined,
+      pptAspectRatio: argv.pptAspectRatio as "16:9" | "4:3" | undefined,
+      pptNoImages: argv.pptNoImages as boolean | undefined,
+      // Extended thinking options for Claude and Gemini models
+      thinking: argv.thinking as boolean | undefined,
+      thinkingBudget: argv.thinkingBudget as number | undefined,
+      thinkingLevel: argv.thinkingLevel as
+        | "minimal"
+        | "low"
+        | "medium"
+        | "high"
+        | undefined,
+      // Region option for cloud providers (Vertex AI, Bedrock, etc.)
+      region: argv.region as string | undefined,
+      // Anthropic subscription options
+      authMethod: argv.authMethod as "api-key" | "oauth" | undefined,
+      subscriptionTier: argv.subscriptionTier as
+        | "free"
+        | "pro"
+        | "max"
+        | "max_5"
+        | "max_20"
+        | "api"
+        | undefined,
+      enableBeta: argv.enableBeta as boolean | undefined,
     };
+  }
+
+  /**
+   * Validate Anthropic subscription options
+   * Ensures subscription tier is provided when using anthropic-subscription provider
+   * or when oauth auth method is selected
+   */
+  private static validateAnthropicSubscriptionOptions(
+    options: Record<string, unknown>,
+  ): void {
+    const provider = options.provider as string | undefined;
+    const authMethod = options.authMethod as string | undefined;
+    let subscriptionTier = options.subscriptionTier as string | undefined;
+    const enableBeta = options.enableBeta as boolean | undefined;
+
+    // Check if using anthropic-subscription provider or oauth auth method
+    const isSubscriptionMode =
+      provider === "anthropic-subscription" || authMethod === "oauth";
+
+    if (isSubscriptionMode && !subscriptionTier) {
+      logger.always(
+        chalk.yellow(
+          "⚠️  Subscription tier not specified. Defaulting to 'api' tier.",
+        ),
+      );
+      logger.always(
+        chalk.gray(
+          "   Use --subscription-tier to specify: free, pro, max, or api",
+        ),
+      );
+      options.subscriptionTier = "api";
+      subscriptionTier = "api";
+    }
+
+    // Validate oauth is required for non-api subscription tiers
+    if (
+      subscriptionTier &&
+      ["free", "pro", "max"].includes(subscriptionTier) &&
+      authMethod !== "oauth"
+    ) {
+      logger.always(
+        chalk.yellow(
+          `⚠️  Subscription tier '${subscriptionTier}' typically uses OAuth authentication.`,
+        ),
+      );
+      logger.always(
+        chalk.gray("   Consider using --auth-method oauth for this tier."),
+      );
+    }
+
+    // Map anthropic-subscription to anthropic provider with subscription options
+    if (provider === "anthropic-subscription") {
+      options.provider = "anthropic";
+      options.useSubscription = true;
+    }
+
+    // Warn about beta features when enabled
+    if (enableBeta) {
+      logger.always(
+        chalk.cyan(
+          "🧪 Beta features enabled for Anthropic. Experimental capabilities may be unstable.",
+        ),
+      );
+    }
+
+    // Build Anthropic auth configuration for provider initialization
+    if (provider === "anthropic" || provider === "anthropic-subscription") {
+      const authConfig: AnthropicAuthConfig = {
+        method: (authMethod === "oauth"
+          ? "oauth"
+          : "api_key") as AnthropicAuthMethod,
+        subscriptionTier: subscriptionTier as
+          | ClaudeSubscriptionTier
+          | undefined,
+      };
+      options.anthropicAuthConfig = authConfig;
+      options.enableBeta = enableBeta;
+    }
   }
 
   // Helper method to handle output
   private static handleOutput(
-    result: GenerateResult | unknown,
+    result: CliGenerateResult | unknown,
     options: BaseCommandArgs & Record<string, unknown>,
   ) {
     let output: string;
@@ -461,12 +1086,59 @@ export class CLICommandFactory {
       if (typeof result === "string") {
         output = result;
       } else if (result && typeof result === "object" && "content" in result) {
-        const generateResult = result as GenerateResult;
+        const generateResult = result as CliGenerateResult;
         output = generateResult.content;
+
+        // 🔧 Handle image generation output
+        if (
+          generateResult.imageOutput?.base64 &&
+          generateResult.imageOutput.base64.trim().length > 0
+        ) {
+          try {
+            // Use custom path or default
+            let imagePath: string;
+            if (options.imageOutput) {
+              imagePath = path.resolve(options.imageOutput as string);
+              // Create parent directory if needed (cross-platform)
+              const dir = path.dirname(imagePath);
+              if (dir && dir !== "." && !fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+              }
+            } else {
+              const imageDir = "generated-images";
+              const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+              imagePath = path.join(imageDir, `image-${timestamp}.png`);
+              // Create directory if it doesn't exist
+              if (!fs.existsSync(imageDir)) {
+                fs.mkdirSync(imageDir, { recursive: true });
+              }
+            }
+
+            // Save image to file
+            const imageBuffer = Buffer.from(
+              generateResult.imageOutput.base64,
+              "base64",
+            );
+            fs.writeFileSync(imagePath, imageBuffer);
+
+            // Store image path in result for JSON output
+            generateResult.imageOutput.savedPath = imagePath;
+
+            // Always print image save confirmation - this is essential output
+            // (not suppressed by quiet flag since users need to know where the image was saved)
+            logger.always(`\n📸 Generated image saved to: ${imagePath}`);
+            logger.always(
+              `   Image size: ${(imageBuffer.length / 1024).toFixed(2)} KB`,
+            );
+          } catch (error) {
+            handleError(error as Error, "Failed to save generated image");
+          }
+        }
 
         // Add analytics display for text mode when enabled
         if (options.enableAnalytics && generateResult.analytics) {
-          output += this.formatAnalyticsForTextMode(generateResult);
+          output +=
+            CLICommandFactory.formatAnalyticsForTextMode(generateResult);
         }
       } else if (result && typeof result === "object" && "text" in result) {
         output = (result as { text: string }).text;
@@ -490,7 +1162,7 @@ export class CLICommandFactory {
    * Saves audio to file when --tts-output flag is provided
    */
   private static async handleTTSOutput(
-    result: GenerateResult | unknown,
+    result: CliGenerateResult | unknown,
     options: BaseCommandArgs & Record<string, unknown>,
   ): Promise<void> {
     // Check if --tts-output flag is provided
@@ -503,7 +1175,7 @@ export class CLICommandFactory {
     if (!result || typeof result !== "object") {
       return;
     }
-    const generateResult = result as GenerateResult;
+    const generateResult = result as CliGenerateResult;
     const audio = generateResult.audio;
 
     if (!audio) {
@@ -540,6 +1212,325 @@ export class CLICommandFactory {
     }
   }
 
+  /**
+   * Helper method to configure options for video generation mode
+   * Auto-configures provider, model, and tools settings for video generation
+   */
+  private static configureVideoMode(
+    enhancedOptions: BaseCommandArgs & Record<string, unknown>,
+    argv: BaseCommandArgs & Record<string, unknown>,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): void {
+    const userEnabledTools = !argv.disableTools; // Tools are enabled by default
+    enhancedOptions.disableTools = true;
+
+    // Resolve video provider from explicit --videoProvider first, then top-level --provider, then default to vertex.
+    if (!enhancedOptions.videoProvider) {
+      enhancedOptions.videoProvider =
+        (enhancedOptions.provider as string | undefined) ?? "vertex";
+      if (options.debug) {
+        logger.debug(
+          `Auto-setting video provider to '${enhancedOptions.videoProvider}' for video generation mode`,
+        );
+      }
+    }
+
+    // Auto-set model to veo-3.1 if not explicitly specified
+    if (!enhancedOptions.model) {
+      // Resolve the alias to the full model ID for Vertex AI
+      const modelAlias = "veo-3.1";
+      const resolvedModel = ModelResolver.resolveModel(modelAlias);
+      const fullModelId = resolvedModel?.id || "veo-3.1-generate-001";
+      enhancedOptions.model = fullModelId;
+      if (options.debug) {
+        logger.debug(
+          `Auto-setting model to '${fullModelId}' for video generation mode`,
+        );
+      }
+    }
+
+    // Warn user if they explicitly enabled tools
+    if (userEnabledTools && !options.quiet) {
+      logger.always(
+        chalk.yellow(
+          "⚠️  Note: MCP tools are not supported in video generation mode and have been disabled.",
+        ),
+      );
+    }
+
+    if (options.debug) {
+      logger.debug("Video generation mode enabled (tools auto-disabled):", {
+        provider: enhancedOptions.provider,
+        model: enhancedOptions.model,
+        resolution: enhancedOptions.videoResolution,
+        length: enhancedOptions.videoLength,
+        aspectRatio: enhancedOptions.videoAspectRatio,
+        audio: enhancedOptions.videoAudio,
+        outputPath: enhancedOptions.videoOutput,
+      });
+    }
+  }
+
+  /**
+   * Helper method to configure options for PPT generation mode
+   * Auto-configures provider, model, and tools settings for presentation generation
+   */
+  private static configurePPTMode(
+    enhancedOptions: BaseCommandArgs & Record<string, unknown>,
+    argv: BaseCommandArgs & Record<string, unknown>,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): void {
+    const userEnabledTools = !argv.disableTools; // Tools are enabled by default
+    enhancedOptions.disableTools = true;
+
+    // Auto-set provider for PPT generation if not explicitly specified
+    // PPT works best with Vertex or Google AI for content planning
+    if (!enhancedOptions.provider) {
+      enhancedOptions.provider = "vertex";
+      if (options.debug) {
+        logger.debug(
+          "Auto-setting provider to 'vertex' for PPT generation mode",
+        );
+      }
+    }
+
+    // Auto-set model if not explicitly specified
+    if (!enhancedOptions.model) {
+      // Use gemini-2.5-flash for fast, high-quality content planning
+      const modelAlias = "gemini-2.5-flash";
+      const resolvedModel = ModelResolver.resolveModel(modelAlias);
+      const fullModelId = resolvedModel?.id || "gemini-2.5-flash-001";
+      enhancedOptions.model = fullModelId;
+      if (options.debug) {
+        logger.debug(
+          `Auto-setting model to '${fullModelId}' for PPT generation mode`,
+        );
+      }
+    }
+
+    // Warn user if they explicitly enabled tools
+    if (userEnabledTools && !options.quiet) {
+      logger.always(
+        chalk.yellow(
+          "⚠️  Note: MCP tools are not supported in PPT generation mode and have been disabled.",
+        ),
+      );
+    }
+
+    if (options.debug) {
+      logger.debug("PPT generation mode enabled (tools auto-disabled):", {
+        provider: enhancedOptions.provider,
+        model: enhancedOptions.model,
+        pages: enhancedOptions.pptPages,
+        theme: enhancedOptions.pptTheme,
+        audience: enhancedOptions.pptAudience,
+        tone: enhancedOptions.pptTone,
+        aspectRatio: enhancedOptions.pptAspectRatio,
+        noImages: enhancedOptions.pptNoImages,
+        outputPath: enhancedOptions.pptOutput,
+      });
+    }
+  }
+
+  /**
+   * Helper method to handle video file output
+   * Saves generated video to file when --videoOutput flag is provided
+   */
+  private static async handleVideoOutput(
+    result: CliGenerateResult | unknown,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<void> {
+    // Check if --videoOutput flag is provided
+    const videoOutputPath = options.videoOutput as string | undefined;
+    if (!videoOutputPath) {
+      return;
+    }
+
+    // Extract video from result with proper type checking
+    if (!result || typeof result !== "object") {
+      return;
+    }
+    const generateResult = result as CliGenerateResult;
+    const video = generateResult.video;
+
+    if (!video) {
+      if (!options.quiet) {
+        logger.always(
+          chalk.yellow(
+            "⚠️  No video available in result. Video generation may not be enabled or the request failed.",
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      // Save video to file
+      const saveResult = await saveVideoToFile(video, videoOutputPath);
+
+      if (saveResult.success) {
+        const sizeInfo = formatVideoFileSize(saveResult.size);
+        const metadataSummary = getVideoMetadataSummary(video);
+
+        logger.always(
+          chalk.green(`🎬 Video saved to: ${saveResult.path} (${sizeInfo})`),
+        );
+
+        if (!options.quiet && metadataSummary) {
+          logger.always(chalk.gray(`   ${metadataSummary}`));
+        }
+      } else {
+        handleError(
+          new Error(saveResult.error || "Failed to save video file"),
+          "Video Output",
+        );
+      }
+    } catch (error) {
+      handleError(error as Error, "Video Output");
+    }
+  }
+
+  /**
+   * Helper method to handle avatar video file output.
+   * Saves the generated avatar buffer to --avatarOutput path when provided.
+   */
+  private static async handleAvatarOutput(
+    result: CliGenerateResult | unknown,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<void> {
+    const avatarOutputPath = options.avatarOutput as string | undefined;
+    if (!avatarOutputPath) {
+      return;
+    }
+    if (!result || typeof result !== "object") {
+      return;
+    }
+    const generateResult = result as CliGenerateResult;
+    const avatar = generateResult.avatar;
+    if (!avatar) {
+      if (!options.quiet) {
+        logger.always(
+          chalk.yellow(
+            "⚠️  No avatar video available in result. Avatar generation may not be enabled or the request failed.",
+          ),
+        );
+      }
+      return;
+    }
+    try {
+      fs.writeFileSync(avatarOutputPath, avatar.buffer);
+      if (!options.quiet) {
+        const sizeStr = formatFileSize(avatar.size);
+        logger.always(
+          chalk.green(
+            `👤 Avatar video saved to: ${avatarOutputPath} (${sizeStr})`,
+          ),
+        );
+      }
+    } catch (error) {
+      handleError(error as Error, "Avatar Output");
+    }
+  }
+
+  /**
+   * Helper method to handle music audio file output.
+   * Saves the generated music buffer to --musicOutput path when provided.
+   */
+  private static async handleMusicOutput(
+    result: CliGenerateResult | unknown,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<void> {
+    const musicOutputPath = options.musicOutput as string | undefined;
+    if (!musicOutputPath) {
+      return;
+    }
+    if (!result || typeof result !== "object") {
+      return;
+    }
+    const generateResult = result as CliGenerateResult;
+    const music = generateResult.music;
+    if (!music) {
+      if (!options.quiet) {
+        logger.always(
+          chalk.yellow(
+            "⚠️  No music available in result. Music generation may not be enabled or the request failed.",
+          ),
+        );
+      }
+      return;
+    }
+    try {
+      fs.writeFileSync(musicOutputPath, music.buffer);
+      if (!options.quiet) {
+        const sizeStr = formatFileSize(music.size);
+        logger.always(
+          chalk.green(`🎵 Music saved to: ${musicOutputPath} (${sizeStr})`),
+        );
+      }
+    } catch (error) {
+      handleError(error as Error, "Music Output");
+    }
+  }
+
+  /**
+   * Helper method to handle PPT file output
+   * Displays PPT generation result info
+   */
+  private static async handlePPTOutput(
+    result: CliGenerateResult | unknown,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): Promise<void> {
+    // Extract PPT from result with proper type checking
+    if (!result || typeof result !== "object") {
+      return;
+    }
+    const generateResult = result as CliGenerateResult;
+    const ppt = generateResult.ppt;
+
+    if (!ppt) {
+      // PPT not in result - either not PPT mode or generation failed
+      return;
+    }
+
+    try {
+      if (options.quiet) {
+        if (ppt.filePath) {
+          logger.always(
+            chalk.green(`📊 Presentation saved to: ${ppt.filePath}`),
+          );
+        } else {
+          logger.always(chalk.green("📊 Presentation generated successfully."));
+        }
+        if (ppt.totalSlides) {
+          logger.always(chalk.white(`📄 Slides: ${ppt.totalSlides}`));
+        }
+        return;
+      }
+
+      logger.always(chalk.green("\n📊 Presentation Generated Successfully!"));
+      logger.always(chalk.gray("─".repeat(50)));
+
+      if (ppt.filePath) {
+        logger.always(chalk.white(`   📁 File: ${ppt.filePath}`));
+      }
+      if (ppt.totalSlides) {
+        logger.always(chalk.white(`   📄 Slides: ${ppt.totalSlides}`));
+      }
+      if (ppt.format) {
+        logger.always(chalk.white(`   📋 Format: ${ppt.format.toUpperCase()}`));
+      }
+
+      logger.always(chalk.gray("─".repeat(50)));
+      logger.always(
+        chalk.cyan(
+          "💡 Tip: Open the file with PowerPoint or Google Slides to view.",
+        ),
+      );
+    } catch (error) {
+      handleError(error as Error, "PPT Output");
+    }
+  }
+
   // Helper method to validate token usage data with fallback handling
   private static isValidTokenUsage(tokens: unknown): tokens is TokenUsage {
     if (!tokens || typeof tokens !== "object" || tokens === null) {
@@ -571,7 +1562,7 @@ export class CLICommandFactory {
 
   // Helper method to normalize token usage data to standard format
   private static normalizeTokenUsage(tokens: unknown): TokenUsage | null {
-    if (!this.isValidTokenUsage(tokens)) {
+    if (!CLICommandFactory.isValidTokenUsage(tokens)) {
       return null;
     }
 
@@ -607,7 +1598,7 @@ export class CLICommandFactory {
   }
 
   // Helper method to format analytics for text mode display
-  private static formatAnalyticsForTextMode(result: GenerateResult): string {
+  private static formatAnalyticsForTextMode(result: CliGenerateResult): string {
     if (!result.analytics) {
       return "";
     }
@@ -628,7 +1619,9 @@ export class CLICommandFactory {
     analyticsText += "\n";
 
     // Token usage with fallback handling
-    const normalizedTokens = this.normalizeTokenUsage(analytics.tokenUsage);
+    const normalizedTokens = CLICommandFactory.normalizeTokenUsage(
+      analytics.tokenUsage,
+    );
     if (normalizedTokens) {
       analyticsText += `   Tokens: ${normalizedTokens.input} input + ${normalizedTokens.output} output = ${normalizedTokens.total} total\n`;
     }
@@ -680,10 +1673,10 @@ export class CLICommandFactory {
    */
   static createGenerateCommand(): CommandModule {
     return {
-      command: ["generate <input>", "gen <input>"],
+      command: ["generate [input]", "gen [input]"],
       describe: "Generate content using AI providers",
       builder: (yargs) => {
-        return this.buildOptions(
+        return CLICommandFactory.buildOptions(
           yargs
             .positional("input", {
               type: "string" as const,
@@ -707,13 +1700,53 @@ export class CLICommandFactory {
               "Enable usage analytics",
             )
             .example(
+              '$0 generate "Futuristic city" --model gemini-2.5-flash-image',
+              "Generate an image",
+            )
+            .example(
+              '$0 generate "Mountain landscape" --model gemini-2.5-flash-image --imageOutput ./my-images/mountain.png',
+              "Generate image with custom path",
+            )
+            .example(
               '$0 generate "Describe this video" --video path/to/video.mp4',
               "Analyze video content",
+            )
+            .example(
+              '$0 generate "Analyze sales" --csv data.csv --csv-format raw',
+              "CSV with raw format (fast, minimal tokens)",
+            )
+            .example(
+              '$0 generate "Summarize data" --csv small.csv --csv-format markdown',
+              "CSV with markdown table (readable)",
+            )
+            .example(
+              '$0 generate "Process data" --csv records.csv --csv-format json',
+              "CSV with JSON format (structured)",
+            )
+            .example(
+              '$0 generate "Product showcase video" --image ./product.jpg --outputMode video --videoOutput ./output.mp4',
+              "Generate video from image",
+            )
+            .example(
+              '$0 generate "Smooth camera movement" --image ./input.jpg --provider vertex --model veo-3.1-generate-001 --outputMode video --videoResolution 720p --videoLength 6 --videoAspectRatio 16:9 --videoOutput ./output.mp4',
+              "Video generation with full options",
+            )
+            .example(
+              '$0 generate "AI in Healthcare" --pptPages 10',
+              "Generate a PowerPoint presentation",
+            )
+            .example(
+              '$0 generate "Company Q4 Results" --pptPages 15 --pptTheme corporate --pptAudience business',
+              "Generate presentation with options",
+            )
+            .example(
+              '$0 generate "Machine Learning 101" --pptTheme minimal --pptTone educational --pptNoImages',
+              "Generate educational slides without AI images",
             ),
         );
       },
       handler: async (argv) =>
-        await this.executeGenerate(argv as GenerateCommandArgs),
+        await CLICommandFactory.executeGenerate(argv as GenerateCommandArgs),
     };
   }
 
@@ -722,10 +1755,10 @@ export class CLICommandFactory {
    */
   static createStreamCommand(): CommandModule {
     return {
-      command: "stream <input>",
+      command: "stream [input]",
       describe: "Stream generation in real-time",
       builder: (yargs) => {
-        return this.buildOptions(
+        return CLICommandFactory.buildOptions(
           yargs
             .positional("input", {
               type: "string" as const,
@@ -751,7 +1784,7 @@ export class CLICommandFactory {
         );
       },
       handler: async (argv) =>
-        await this.executeStream(argv as StreamCommandArgs),
+        await CLICommandFactory.executeStream(argv as StreamCommandArgs),
     };
   }
 
@@ -763,7 +1796,7 @@ export class CLICommandFactory {
       command: "batch <file>",
       describe: "Process multiple prompts from a file",
       builder: (yargs) => {
-        return this.buildOptions(
+        return CLICommandFactory.buildOptions(
           yargs
             .positional("file", {
               type: "string" as const,
@@ -786,7 +1819,7 @@ export class CLICommandFactory {
         );
       },
       handler: async (argv) =>
-        await this.executeBatch(argv as BatchCommandArgs),
+        await CLICommandFactory.executeBatch(argv as BatchCommandArgs),
     };
   }
 
@@ -803,7 +1836,7 @@ export class CLICommandFactory {
             "status",
             "Check status of all configured AI providers",
             (y) =>
-              this.buildOptions(y)
+              CLICommandFactory.buildOptions(y)
                 .example("$0 provider status", "Check all provider status")
                 .example(
                   "$0 provider status --verbose",
@@ -828,7 +1861,7 @@ export class CLICommandFactory {
       describe:
         "Check AI provider connectivity and performance (alias for provider status)",
       builder: (yargs) =>
-        this.buildOptions(yargs)
+        CLICommandFactory.buildOptions(yargs)
           .example("$0 status", "Quick provider status check")
           .example("$0 status --verbose", "Detailed connectivity diagnostics")
           .example("$0 status --format json", "Export status as JSON"),
@@ -871,20 +1904,22 @@ export class CLICommandFactory {
             "stats",
             "Show conversation memory statistics",
             (y) =>
-              this.buildOptions(y)
+              CLICommandFactory.buildOptions(y)
                 .example("$0 memory stats", "Show memory usage statistics")
                 .example(
                   "$0 memory stats --format json",
                   "Export stats as JSON",
                 ),
             async (argv) =>
-              await this.executeMemoryStats(argv as BaseCommandArgs),
+              await CLICommandFactory.executeMemoryStats(
+                argv as BaseCommandArgs,
+              ),
           )
           .command(
             "history <sessionId>",
             "Show conversation history for a session",
             (y) =>
-              this.buildOptions(y)
+              CLICommandFactory.buildOptions(y)
                 .positional("sessionId", {
                   type: "string" as const,
                   description: "Session ID to retrieve history for",
@@ -899,7 +1934,7 @@ export class CLICommandFactory {
                   "Export history as JSON",
                 ),
             async (argv) =>
-              await this.executeMemoryHistory(
+              await CLICommandFactory.executeMemoryHistory(
                 argv as BaseCommandArgs & { sessionId: string },
               ),
           )
@@ -907,7 +1942,7 @@ export class CLICommandFactory {
             "clear [sessionId]",
             "Clear conversation history",
             (y) =>
-              this.buildOptions(y)
+              CLICommandFactory.buildOptions(y)
                 .positional("sessionId", {
                   type: "string" as const,
                   description:
@@ -920,7 +1955,7 @@ export class CLICommandFactory {
                   "Clear specific session",
                 ),
             async (argv) =>
-              await this.executeMemoryClear(
+              await CLICommandFactory.executeMemoryClear(
                 argv as BaseCommandArgs & { sessionId?: string },
               ),
           )
@@ -942,7 +1977,7 @@ export class CLICommandFactory {
           .command(
             "init",
             "Interactive configuration setup wizard",
-            (y) => this.buildOptions(y),
+            (y) => CLICommandFactory.buildOptions(y),
             async (_argv) => {
               await configManager.initInteractive();
             },
@@ -950,7 +1985,7 @@ export class CLICommandFactory {
           .command(
             "show",
             "Display current configuration",
-            (y) => this.buildOptions(y),
+            (y) => CLICommandFactory.buildOptions(y),
             async (_argv) => {
               configManager.showConfig();
             },
@@ -958,7 +1993,7 @@ export class CLICommandFactory {
           .command(
             "validate",
             "Validate current configuration",
-            (y) => this.buildOptions(y),
+            (y) => CLICommandFactory.buildOptions(y),
             async (_argv) => {
               const result = configManager.validateConfig();
               if (result.valid) {
@@ -975,7 +2010,7 @@ export class CLICommandFactory {
           .command(
             "reset",
             "Reset configuration to defaults",
-            (y) => this.buildOptions(y),
+            (y) => CLICommandFactory.buildOptions(y),
             async (_argv) => {
               configManager.resetConfig();
             },
@@ -983,8 +2018,9 @@ export class CLICommandFactory {
           .command(
             "export",
             "Export current configuration",
-            (y) => this.buildOptions(y),
-            (argv) => this.executeConfigExport(argv as BaseCommandArgs),
+            (y) => CLICommandFactory.buildOptions(y),
+            (argv) =>
+              CLICommandFactory.executeConfigExport(argv as BaseCommandArgs),
           )
           .demandCommand(1, "");
       },
@@ -999,7 +2035,7 @@ export class CLICommandFactory {
     return {
       command: "validate",
       describe: "Validate current configuration (alias for 'config validate')",
-      builder: (yargs) => this.buildOptions(yargs),
+      builder: (yargs) => CLICommandFactory.buildOptions(yargs),
       handler: async (_argv) => {
         const result = configManager.validateConfig();
         if (result.valid) {
@@ -1023,12 +2059,12 @@ export class CLICommandFactory {
       command: "get-best-provider",
       describe: "Show the best available AI provider",
       builder: (yargs) =>
-        this.buildOptions(yargs)
+        CLICommandFactory.buildOptions(yargs)
           .example("$0 get-best-provider", "Get best available provider")
           .example("$0 get-best-provider --format json", "Get provider as JSON")
           .example("$0 get-best-provider --quiet", "Just the provider name"),
       handler: async (argv) =>
-        await this.executeGetBestProvider(argv as BaseCommandArgs),
+        await CLICommandFactory.executeGetBestProvider(argv as BaseCommandArgs),
     };
   }
 
@@ -1047,7 +2083,7 @@ export class CLICommandFactory {
       command: ["setup [provider]", "s [provider]"],
       describe: "Interactive AI provider setup wizard",
       builder: (yargs) => {
-        return this.buildOptions(
+        return CLICommandFactory.buildOptions(
           yargs
             .positional("provider", {
               type: "string" as const,
@@ -1055,12 +2091,31 @@ export class CLICommandFactory {
               choices: [
                 "google-ai",
                 "openai",
+                "openrouter",
                 "anthropic",
+                "anthropic-subscription", // Setup Anthropic with subscription tier
                 "azure",
                 "bedrock",
                 "vertex",
                 "huggingface",
                 "mistral",
+                "deepseek",
+                "nvidia-nim",
+                "lm-studio",
+                "llamacpp",
+                "xai",
+                "groq",
+                "cohere",
+                "together-ai",
+                "fireworks",
+                "perplexity",
+                "cloudflare",
+                "replicate",
+                "voyage",
+                "jina",
+                "stability",
+                "ideogram",
+                "recraft",
               ],
             })
             .option("list", {
@@ -1072,8 +2127,28 @@ export class CLICommandFactory {
               type: "boolean" as const,
               description: "Show provider configuration status",
             })
+            .option("subscription-tier", {
+              type: "string" as const,
+              choices: ["free", "pro", "max", "max_5", "max_20", "api"],
+              description:
+                "Anthropic subscription tier for setup (free, pro, max, max_5, max_20, api)",
+            })
+            .option("auth-method", {
+              type: "string" as const,
+              choices: ["api-key", "oauth"],
+              description:
+                "Authentication method for Anthropic (api-key or oauth)",
+            })
             .example("$0 setup", "Interactive setup wizard")
             .example("$0 setup --provider openai", "Setup specific provider")
+            .example(
+              "$0 setup --provider anthropic --subscription-tier pro",
+              "Setup Anthropic with Pro subscription",
+            )
+            .example(
+              "$0 setup --provider anthropic --auth-method oauth",
+              "Setup Anthropic with OAuth authentication",
+            )
             .example("$0 setup --list", "List all providers")
             .example("$0 setup --status", "Check provider status"),
         );
@@ -1084,6 +2159,14 @@ export class CLICommandFactory {
             provider?: string;
             list?: boolean;
             status?: boolean;
+            subscriptionTier?:
+              | "free"
+              | "pro"
+              | "max"
+              | "max_5"
+              | "max_20"
+              | "api";
+            authMethod?: "api-key" | "oauth";
           },
         ),
     };
@@ -1108,7 +2191,7 @@ export class CLICommandFactory {
       describe:
         "Start an interactive loop session with conversation management",
       builder: (yargs) =>
-        this.buildOptions(yargs, {
+        CLICommandFactory.buildOptions(yargs, {
           "enable-conversation-memory": {
             type: "boolean",
             description: "Enable conversation memory for the loop session",
@@ -1145,6 +2228,16 @@ export class CLICommandFactory {
             description: "List available conversations and exit",
             alias: "l",
           },
+          "compact-threshold": {
+            describe: "Context compaction trigger threshold (0.0-1.0)",
+            type: "number",
+            default: 0.8,
+          },
+          "disable-compaction": {
+            describe: "Disable automatic context compaction",
+            type: "boolean",
+            default: false,
+          },
         })
           .example(
             "$0 loop",
@@ -1177,6 +2270,8 @@ export class CLICommandFactory {
           maxTurnsPerSession,
           autoRedis,
           listConversations,
+          compactThreshold,
+          disableCompaction,
         } = argv;
 
         if (enableConversationMemory) {
@@ -1206,14 +2301,17 @@ export class CLICommandFactory {
             enabled: true,
             maxSessions: maxSessions as number,
             maxTurnsPerSession: maxTurnsPerSession as number,
+            contextCompaction: {
+              enabled: !disableCompaction,
+              threshold: compactThreshold as number,
+            },
           };
         }
 
         // Handle --list-conversations option
         if (listConversations) {
-          const { ConversationSelector } = await import(
-            "../loop/conversationSelector.js"
-          );
+          const { ConversationSelector } =
+            await import("../loop/conversationSelector.js");
           const conversationSelector = new ConversationSelector();
 
           try {
@@ -1293,7 +2391,7 @@ export class CLICommandFactory {
       command: "completion",
       describe: "Generate shell completion script",
       builder: (yargs) =>
-        this.buildOptions(yargs)
+        CLICommandFactory.buildOptions(yargs)
           .example("$0 completion", "Generate shell completion")
           .example(
             "$0 completion > ~/.neurolink-completion.sh",
@@ -1307,7 +2405,7 @@ export class CLICommandFactory {
             "Add the completion script to your shell profile for persistent completions",
           ),
       handler: async (argv) =>
-        await this.executeCompletion(argv as BaseCommandArgs),
+        await CLICommandFactory.executeCompletion(argv as BaseCommandArgs),
     };
   }
 
@@ -1436,28 +2534,413 @@ export class CLICommandFactory {
   }
 
   /**
-   * Execute the generate command
+   * Handle stdin input for generate command
    */
-  private static async executeGenerate(argv: GenerateCommandArgs) {
-    // Handle stdin input if no input provided
+  private static async handleGenerateStdinInput(
+    argv: GenerateCommandArgs,
+  ): Promise<string> {
+    // M10: STT-only runs (--stt + --input-audio with no positional prompt)
+    // are valid — the transcription becomes the prompt downstream. Skip the
+    // stdin/empty-input check in that case so users don't get
+    // "Input required..." for an STT-only command.
+    const isSttOnly = !!(
+      (argv as { stt?: boolean }).stt &&
+      (argv as { inputAudio?: string }).inputAudio
+    );
     if (!argv.input && !process.stdin.isTTY) {
       let stdinData = "";
       process.stdin.setEncoding("utf8");
       for await (const chunk of process.stdin) {
         stdinData += chunk;
       }
-      argv.input = stdinData.trim();
-      if (!argv.input) {
+      const trimmedData = stdinData.trim();
+      if (!trimmedData) {
+        if (isSttOnly) {
+          return "";
+        }
         throw new Error("No input received from stdin");
       }
+      return trimmedData;
     } else if (!argv.input) {
+      if (isSttOnly) {
+        return "";
+      }
       throw new Error(
         'Input required. Use: neurolink generate "your prompt" or echo "prompt" | neurolink generate',
       );
     }
+    return argv.input as string;
+  }
 
-    const options = this.processOptions(argv);
-    const spinner = argv.quiet ? null : ora("🤖 Generating text...").start();
+  /**
+   * Detect output mode (video, ppt, avatar, music, or text) based on CLI arguments
+   */
+  private static detectGenerateOutputMode(
+    argv: GenerateCommandArgs,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): {
+    isVideoMode: boolean;
+    isPPTMode: boolean;
+    isAvatarMode: boolean;
+    isMusicMode: boolean;
+    spinnerMessage: string;
+  } {
+    const outputMode = (options as Record<string, unknown>).outputMode;
+
+    const hasPPTFlags =
+      argv.pptPages !== undefined ||
+      argv.pptTheme !== undefined ||
+      argv.pptAudience !== undefined ||
+      argv.pptTone !== undefined ||
+      argv.pptOutput !== undefined ||
+      argv.pptAspectRatio !== undefined ||
+      argv.pptNoImages === true;
+
+    const hasVideoSignals =
+      outputMode === "video" ||
+      argv.videoOutput !== undefined ||
+      argv.videoProvider !== undefined ||
+      argv.videoLength !== undefined ||
+      argv.videoResolution !== undefined ||
+      argv.videoAspectRatio !== undefined;
+    const hasPPTSignals = outputMode === "ppt" || hasPPTFlags;
+    const hasAvatarSignals =
+      outputMode === "avatar" ||
+      argv.avatarProvider !== undefined ||
+      argv.avatarImage !== undefined ||
+      argv.avatarText !== undefined ||
+      argv.avatarAudio !== undefined ||
+      argv.avatarVoice !== undefined ||
+      argv.avatarOutput !== undefined;
+    const hasMusicSignals =
+      outputMode === "music" ||
+      argv.musicProvider !== undefined ||
+      argv.musicGenre !== undefined ||
+      argv.musicMood !== undefined ||
+      argv.musicDuration !== undefined ||
+      argv.musicTempo !== undefined ||
+      argv.musicOutput !== undefined;
+
+    const activeModes = [
+      hasVideoSignals,
+      hasPPTSignals,
+      hasAvatarSignals,
+      hasMusicSignals,
+    ].filter(Boolean).length;
+
+    if (activeModes > 1) {
+      throw new Error(
+        "Conflicting output mode signals detected. Use exactly one of video / ppt / avatar / music modes (or text).",
+      );
+    }
+
+    // Derive mode flags from the full signal set so that flag-only invocations
+    // (e.g. --videoOutput without --output-mode video) are handled correctly.
+    const isVideoMode = hasVideoSignals;
+    const isAvatarMode = hasAvatarSignals;
+    const isMusicMode = hasMusicSignals;
+    const isPPTMode = hasPPTSignals;
+
+    const spinnerMessage = isVideoMode
+      ? "🎬 Generating video... (this may take 1-2 minutes)"
+      : isPPTMode
+        ? "📊 Generating presentation... (this may take 2-5 minutes)"
+        : isAvatarMode
+          ? "👤 Generating avatar video... (this may take 1-3 minutes)"
+          : isMusicMode
+            ? "🎵 Generating music... (this may take 30s-2 minutes)"
+            : "🤖 Generating text...";
+
+    return {
+      isVideoMode,
+      isPPTMode,
+      isAvatarMode,
+      isMusicMode,
+      spinnerMessage,
+    };
+  }
+
+  /**
+   * Process context for generation command
+   */
+  private static processGenerateContext(
+    inputText: string,
+    options: BaseCommandArgs & Record<string, unknown>,
+  ): { inputText: string; contextMetadata: Partial<BaseContext> | undefined } {
+    let processedInputText = inputText;
+    let contextMetadata: Partial<BaseContext> | undefined;
+
+    if (options.context && options.contextConfig) {
+      const processedContextResult = ContextFactory.processContext(
+        options.context as unknown as BaseContext,
+        options.contextConfig,
+      );
+
+      if (processedContextResult.processedContext) {
+        processedInputText =
+          processedContextResult.processedContext + processedInputText;
+      }
+
+      contextMetadata = {
+        ...ContextFactory.extractAnalyticsContext(
+          options.context as unknown as BaseContext,
+        ),
+        contextMode: processedContextResult.config.mode,
+        contextTruncated: processedContextResult.metadata.truncated,
+      };
+
+      if (options.debug) {
+        logger.debug("Context processed:", {
+          mode: processedContextResult.config.mode,
+          truncated: processedContextResult.metadata.truncated,
+          processingTime: processedContextResult.metadata.processingTime,
+        });
+      }
+    }
+
+    return { inputText: processedInputText, contextMetadata };
+  }
+
+  /**
+   * Build multimodal input from CLI arguments
+   */
+  private static buildGenerateMultimodalInput(
+    inputText: string,
+    argv: GenerateCommandArgs,
+  ): {
+    text: string;
+    images?: Array<Buffer | string>;
+    csvFiles?: Array<Buffer | string>;
+    pdfFiles?: Array<Buffer | string>;
+    videoFiles?: Array<Buffer | string>;
+    files?: Array<Buffer | string>;
+  } {
+    const imageBuffers = CLICommandFactory.processCliImages(
+      argv.image as string | string[] | undefined,
+    );
+    const csvFiles = CLICommandFactory.processCliCSVFiles(
+      argv.csv as string | string[] | undefined,
+    );
+    const pdfFiles = CLICommandFactory.processCliPDFFiles(
+      argv.pdf as string | string[] | undefined,
+    );
+    const videoFiles = CLICommandFactory.processCliVideoFiles(
+      argv.video as string | string[] | undefined,
+    );
+    const files = CLICommandFactory.processCliFiles(
+      argv.file as string | string[] | undefined,
+    );
+
+    return {
+      text: inputText,
+      ...(imageBuffers && { images: imageBuffers }),
+      ...(csvFiles && { csvFiles }),
+      ...(pdfFiles && { pdfFiles }),
+      ...(videoFiles && { videoFiles }),
+      ...(files && { files }),
+    };
+  }
+
+  /**
+   * Build output configuration for generate request
+   */
+  private static buildGenerateOutputConfig(
+    isVideoMode: boolean,
+    isPPTMode: boolean,
+    enhancedOptions: BaseCommandArgs & Record<string, unknown>,
+    isAvatarMode = false,
+    isMusicMode = false,
+  ): Record<string, unknown> | undefined {
+    if (isVideoMode) {
+      return {
+        mode: "video" as const,
+        video: {
+          provider: enhancedOptions.videoProvider as string | undefined,
+          resolution: enhancedOptions.videoResolution as
+            | "720p"
+            | "1080p"
+            | undefined,
+          length: enhancedOptions.videoLength as 4 | 6 | 8 | undefined,
+          aspectRatio: enhancedOptions.videoAspectRatio as
+            | "9:16"
+            | "16:9"
+            | undefined,
+          audio: enhancedOptions.videoAudio as boolean | undefined,
+        },
+      };
+    }
+
+    if (isAvatarMode) {
+      return {
+        mode: "avatar" as const,
+        avatar: {
+          provider: enhancedOptions.avatarProvider as string | undefined,
+          image: enhancedOptions.avatarImage as string | undefined,
+          audio: enhancedOptions.avatarAudio as string | undefined,
+          text: enhancedOptions.avatarText as string | undefined,
+          voice: enhancedOptions.avatarVoice as string | undefined,
+          quality: enhancedOptions.avatarQuality as
+            | "standard"
+            | "hd"
+            | undefined,
+          format: enhancedOptions.avatarFormat as
+            | "mp4"
+            | "webm"
+            | "mov"
+            | undefined,
+          output: enhancedOptions.avatarOutput as string | undefined,
+        },
+      };
+    }
+
+    if (isMusicMode) {
+      return {
+        mode: "music" as const,
+        music: {
+          prompt: "", // Filled in from input.text/prompt by baseProvider
+          provider: enhancedOptions.musicProvider as string | undefined,
+          duration: enhancedOptions.musicDuration as number | undefined,
+          format: enhancedOptions.musicFormat as
+            | "mp3"
+            | "wav"
+            | "flac"
+            | "ogg"
+            | undefined,
+          genre: enhancedOptions.musicGenre as string | undefined,
+          mood: enhancedOptions.musicMood as string | undefined,
+          tempo: enhancedOptions.musicTempo as number | undefined,
+          output: enhancedOptions.musicOutput as string | undefined,
+        },
+      };
+    }
+
+    if (isPPTMode) {
+      return {
+        mode: "ppt" as const,
+        ppt: {
+          pages: (enhancedOptions.pptPages as number) || 10,
+          theme: enhancedOptions.pptTheme as
+            | "modern"
+            | "corporate"
+            | "creative"
+            | "minimal"
+            | "dark"
+            | undefined,
+          audience: enhancedOptions.pptAudience as
+            | "business"
+            | "students"
+            | "technical"
+            | "general"
+            | undefined,
+          tone: enhancedOptions.pptTone as
+            | "professional"
+            | "casual"
+            | "educational"
+            | "persuasive"
+            | undefined,
+          aspectRatio:
+            (enhancedOptions.pptAspectRatio as "16:9" | "4:3") || "16:9",
+          generateAIImages: !(enhancedOptions.pptNoImages as boolean),
+          outputPath: enhancedOptions.pptOutput as string | undefined,
+        },
+      };
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Handle successful generation result
+   */
+  private static async handleGenerateSuccess(
+    result: CliGenerateResult | unknown,
+    options: BaseCommandArgs & Record<string, unknown>,
+    modes: {
+      isVideoMode: boolean;
+      isPPTMode: boolean;
+      isAvatarMode: boolean;
+      isMusicMode: boolean;
+    },
+    spinner: ReturnType<typeof ora> | null,
+  ): Promise<void> {
+    const { isVideoMode, isPPTMode, isAvatarMode, isMusicMode } = modes;
+    const genResult = result as CliGenerateResult;
+    if (spinner) {
+      if (isVideoMode) {
+        spinner.succeed(chalk.green("✅ Video generated successfully!"));
+      } else if (isPPTMode) {
+        spinner.succeed(chalk.green("✅ Presentation generated successfully!"));
+      } else if (isAvatarMode) {
+        spinner.succeed(chalk.green("✅ Avatar video generated successfully!"));
+      } else if (isMusicMode) {
+        spinner.succeed(chalk.green("✅ Music generated successfully!"));
+      } else {
+        spinner.succeed(chalk.green("✅ Text generated successfully!"));
+      }
+    }
+
+    if (!options.quiet) {
+      const providerInfo = genResult.provider || "auto";
+      const modelInfo = genResult.model || "default";
+      logger.always(
+        chalk.gray(`🔧 Provider: ${providerInfo} | Model: ${modelInfo}`),
+      );
+    }
+
+    if (!isVideoMode && !isPPTMode && !isAvatarMode && !isMusicMode) {
+      CLICommandFactory.handleOutput(genResult, options);
+    }
+
+    await CLICommandFactory.handleTTSOutput(genResult, options);
+    await CLICommandFactory.handleVideoOutput(genResult, options);
+    await CLICommandFactory.handleAvatarOutput(genResult, options);
+    await CLICommandFactory.handleMusicOutput(genResult, options);
+    await CLICommandFactory.handlePPTOutput(genResult, options);
+
+    if (options.debug) {
+      logger.debug("\n" + chalk.yellow("Debug Information:"));
+      logger.debug("Provider:", genResult.provider);
+      logger.debug("Model:", genResult.model);
+      if (genResult.analytics) {
+        logger.debug(
+          "Analytics:",
+          JSON.stringify(genResult.analytics, null, 2),
+        );
+      }
+      if (genResult.evaluation) {
+        logger.debug(
+          "Evaluation:",
+          JSON.stringify(genResult.evaluation, null, 2),
+        );
+      }
+    }
+
+    if (!globalSession.getCurrentSessionId()) {
+      await CLICommandFactory.flushLangfuseTraces();
+      process.exit(0);
+    }
+  }
+
+  /**
+   * Execute the generate command
+   */
+  private static async executeGenerate(argv: GenerateCommandArgs) {
+    // Handle stdin input
+    const rawInput = await CLICommandFactory.handleGenerateStdinInput(argv);
+    argv.input = rawInput;
+
+    const options = CLICommandFactory.processOptions(argv);
+
+    // Detect output mode
+    const {
+      isVideoMode,
+      isPPTMode,
+      isAvatarMode,
+      isMusicMode,
+      spinnerMessage,
+    } = CLICommandFactory.detectGenerateOutputMode(argv, options);
+
+    const spinner = argv.quiet ? null : ora(spinnerMessage).start();
 
     try {
       // Add delay if specified
@@ -1465,38 +2948,11 @@ export class CLICommandFactory {
         await new Promise((resolve) => setTimeout(resolve, options.delay));
       }
 
-      // Process context if provided
-      let inputText = argv.input as string;
-      let contextMetadata: Partial<BaseContext> | undefined;
+      CLICommandFactory.validateCliInputFiles(argv);
 
-      if (options.context && options.contextConfig) {
-        const processedContextResult = ContextFactory.processContext(
-          options.context,
-          options.contextConfig,
-        );
-
-        // Integrate context into prompt if configured
-        if (processedContextResult.processedContext) {
-          inputText = processedContextResult.processedContext + inputText;
-        }
-
-        // Add context metadata for analytics
-        contextMetadata = {
-          ...ContextFactory.extractAnalyticsContext(
-            options.context as BaseContext,
-          ),
-          contextMode: processedContextResult.config.mode,
-          contextTruncated: processedContextResult.metadata.truncated,
-        };
-
-        if (options.debug) {
-          logger.debug("Context processed:", {
-            mode: processedContextResult.config.mode,
-            truncated: processedContextResult.metadata.truncated,
-            processingTime: processedContextResult.metadata.processingTime,
-          });
-        }
-      }
+      // Process context
+      const { inputText, contextMetadata } =
+        CLICommandFactory.processGenerateContext(rawInput, options);
 
       // Handle dry-run mode for testing
       if (options.dryRun) {
@@ -1504,11 +2960,7 @@ export class CLICommandFactory {
           content: "Mock response for testing purposes",
           provider: options.provider || "auto",
           model: options.model || "test-model",
-          usage: {
-            input: 10,
-            output: 15,
-            total: 25,
-          },
+          usage: { input: 10, output: 15, total: 25 },
           responseTime: 150,
           analytics: options.enableAnalytics
             ? {
@@ -1536,24 +2988,25 @@ export class CLICommandFactory {
         if (spinner) {
           spinner.succeed(chalk.green("✅ Dry-run completed successfully!"));
         }
-
-        this.handleOutput(mockResult, options);
-
+        CLICommandFactory.handleOutput(mockResult, options);
         if (options.debug) {
           logger.debug("\n" + chalk.yellow("Debug Information (Dry-run):"));
           logger.debug("Provider:", mockResult.provider);
           logger.debug("Model:", mockResult.model);
           logger.debug("Mode: DRY-RUN (no actual API calls made)");
         }
-
         if (!globalSession.getCurrentSessionId()) {
-          await this.flushLangfuseTraces();
+          await CLICommandFactory.flushLangfuseTraces();
           process.exit(0);
         }
+        return;
       }
 
+      // Initialize SDK and session
       const sdk = globalSession.getOrCreateNeuroLink();
-      const sessionVariables = globalSession.getSessionVariables();
+      const sessionVariables = CLICommandFactory.normalizeLoopSessionVariables(
+        globalSession.getSessionVariables(),
+      );
       const enhancedOptions = { ...options, ...sessionVariables };
       const sessionId = globalSession.getCurrentSessionId();
       const context = sessionId
@@ -1567,113 +3020,148 @@ export class CLICommandFactory {
         });
       }
 
-      // Process CLI multimodal inputs
-      const imageBuffers = CLICommandFactory.processCliImages(
-        argv.image as string | string[] | undefined,
+      // Configure mode-specific options
+      if (isVideoMode) {
+        CLICommandFactory.configureVideoMode(enhancedOptions, argv, options);
+      }
+      if (isPPTMode) {
+        CLICommandFactory.configurePPTMode(enhancedOptions, argv, options);
+      }
+
+      // Build multimodal input and output configuration
+      const generateInput = CLICommandFactory.buildGenerateMultimodalInput(
+        inputText,
+        argv,
       );
-      const csvFiles = CLICommandFactory.processCliCSVFiles(
-        argv.csv as string | string[] | undefined,
-      );
-      const pdfFiles = CLICommandFactory.processCliPDFFiles(
-        argv.pdf as string | string[] | undefined,
-      );
-      const videoFiles = CLICommandFactory.processCliVideoFiles(
-        argv.video as string | string[] | undefined,
-      );
-      const files = CLICommandFactory.processCliFiles(
-        argv.file as string | string[] | undefined,
+      const outputConfig = CLICommandFactory.buildGenerateOutputConfig(
+        isVideoMode,
+        isPPTMode,
+        enhancedOptions,
+        isAvatarMode,
+        isMusicMode,
       );
 
-      const generateInput = {
-        text: inputText,
-        ...(imageBuffers && { images: imageBuffers }),
-        ...(csvFiles && { csvFiles }),
-        ...(pdfFiles && { pdfFiles }),
-        ...(videoFiles && { videoFiles }),
-        ...(files && { files }),
-      };
+      // Read audio file for STT if --input-audio is provided.
+      // NEW10: existsSync guard mirrors the stream handler so a missing file
+      // produces a friendly error here too instead of a raw ENOENT crash.
+      const inputAudioPath = enhancedOptions.inputAudio as string | undefined;
+      if (inputAudioPath && !fs.existsSync(inputAudioPath)) {
+        throw new Error(`--input-audio file not found: ${inputAudioPath}`);
+      }
+      const inputAudioBuffer = inputAudioPath
+        ? fs.readFileSync(inputAudioPath)
+        : undefined;
+      // m2: shared format helper (was duplicated in generate + stream
+      // handlers; now lives in src/lib/utils/audioFormatDetector.ts).
+      const { inferAudioFormatFromPath } =
+        await import("../../lib/utils/audioFormatDetector.js");
+      const inputAudioFormat = inferAudioFormatFromPath(inputAudioPath);
 
-      const result = await sdk.generate({
-        input: generateInput,
-        csvOptions: {
-          maxRows: argv.csvMaxRows as number | undefined,
-          formatStyle: argv.csvFormat as
-            | "raw"
-            | "markdown"
-            | "json"
+      const runGenerate = () =>
+        sdk.generate({
+          input: generateInput,
+          csvOptions: {
+            maxRows: argv.csvMaxRows as number | undefined,
+            formatStyle: argv.csvFormat as
+              | "raw"
+              | "markdown"
+              | "json"
+              | undefined,
+          },
+          videoOptions: {
+            frames: argv.videoFrames as number | undefined,
+            quality: argv.videoQuality as number | undefined,
+            format: argv.videoFormat as "jpeg" | "png" | undefined,
+            transcribeAudio: argv.transcribeAudio as boolean | undefined,
+          },
+          output: outputConfig,
+          provider: enhancedOptions.provider,
+          model: enhancedOptions.model,
+          temperature: enhancedOptions.temperature,
+          maxTokens: enhancedOptions.maxTokens,
+          topP: enhancedOptions.topP as number | undefined,
+          topK: enhancedOptions.topK as number | undefined,
+          stopSequences: enhancedOptions.stopSequences as string[] | undefined,
+          systemPrompt: enhancedOptions.systemPrompt,
+          timeout: enhancedOptions.timeout
+            ? enhancedOptions.timeout * 1000
+            : undefined,
+          disableTools: enhancedOptions.disableTools,
+          enabledToolNames: enhancedOptions.enabledToolNames as
+            | string[]
             | undefined,
-        },
-        videoOptions: {
-          frames: argv.videoFrames as number | undefined,
-          quality: argv.videoQuality as number | undefined,
-          format: argv.videoFormat as "jpeg" | "png" | undefined,
-          transcribeAudio: argv.transcribeAudio as boolean | undefined,
-        },
-        provider: enhancedOptions.provider,
-        model: enhancedOptions.model,
-        temperature: enhancedOptions.temperature,
-        maxTokens: enhancedOptions.maxTokens,
-        systemPrompt: enhancedOptions.systemPrompt,
-        timeout: enhancedOptions.timeout
-          ? enhancedOptions.timeout * 1000
-          : undefined,
-        disableTools: enhancedOptions.disableTools,
-        enableAnalytics: enhancedOptions.enableAnalytics,
-        enableEvaluation: enhancedOptions.enableEvaluation,
-        evaluationDomain: enhancedOptions.evaluationDomain as
-          | string
-          | undefined,
-        toolUsageContext: enhancedOptions.toolUsageContext as
-          | string
-          | undefined,
-        context: context,
-        factoryConfig: enhancedOptions.domain
-          ? {
-              domainType: enhancedOptions.domain,
-              enhancementType: "domain-configuration",
-              validateDomainData: true,
-            }
-          : undefined,
-      });
+          enableAnalytics: enhancedOptions.enableAnalytics,
+          enableEvaluation: enhancedOptions.enableEvaluation,
+          evaluationDomain: enhancedOptions.evaluationDomain as
+            | string
+            | undefined,
+          toolUsageContext: enhancedOptions.toolUsageContext as
+            | string
+            | undefined,
+          context: context,
+          region: (options as Record<string, unknown>).region as
+            | string
+            | undefined,
+          thinkingConfig: createThinkingConfigFromRecord(
+            options as Record<string, unknown>,
+          ),
+          factoryConfig: enhancedOptions.domain
+            ? {
+                domainType: enhancedOptions.domain,
+                enhancementType: "domain-configuration",
+                validateDomainData: true,
+              }
+            : undefined,
+          // RAG configuration
+          rag: (argv.ragFiles as string[] | undefined)?.length
+            ? {
+                files: argv.ragFiles as string[],
+                strategy: argv.ragStrategy as ChunkingStrategy | undefined,
+                chunkSize: argv.ragChunkSize as number | undefined,
+                chunkOverlap: argv.ragChunkOverlap as number | undefined,
+                topK: argv.ragTopK as number | undefined,
+              }
+            : undefined,
+          // TTS configuration
+          tts: enhancedOptions.tts
+            ? {
+                enabled: true,
+                useAiResponse: true,
+                voice: enhancedOptions.ttsVoice as string | undefined,
+                provider: enhancedOptions.ttsProvider as string | undefined,
+                format:
+                  (enhancedOptions.ttsFormat as
+                    | import("../../lib/types/index.js").TTSAudioFormat
+                    | undefined) || undefined,
+                speed: enhancedOptions.ttsSpeed as number | undefined,
+                quality: enhancedOptions.ttsQuality as
+                  | "standard"
+                  | "hd"
+                  | undefined,
+                output: enhancedOptions.ttsOutput as string | undefined,
+                play: enhancedOptions.ttsPlay as boolean | undefined,
+              }
+            : undefined,
+          // STT configuration
+          stt: enhancedOptions.stt
+            ? {
+                enabled: true,
+                provider: enhancedOptions.sttProvider as string | undefined,
+                language: enhancedOptions.sttLanguage as string | undefined,
+                ...(inputAudioBuffer && { audio: inputAudioBuffer }),
+                ...(inputAudioFormat && { format: inputAudioFormat }),
+              }
+            : undefined,
+        });
+      const result = await runGenerate();
 
-      if (spinner) {
-        spinner.succeed(chalk.green("✅ Text generated successfully!"));
-      }
-
-      // Display provider and model info by default (unless quiet mode)
-      if (!options.quiet) {
-        const providerInfo = result.provider || "auto";
-        const modelInfo = result.model || "default";
-        logger.always(
-          chalk.gray(`🔧 Provider: ${providerInfo} | Model: ${modelInfo}`),
-        );
-      }
-
-      // Handle output with universal formatting
-      this.handleOutput(result, options);
-
-      // Handle TTS audio file output if --tts-output is provided
-      await this.handleTTSOutput(result, options);
-
-      if (options.debug) {
-        logger.debug("\n" + chalk.yellow("Debug Information:"));
-        logger.debug("Provider:", result.provider);
-        logger.debug("Model:", result.model);
-        if (result.analytics) {
-          logger.debug("Analytics:", JSON.stringify(result.analytics, null, 2));
-        }
-        if (result.evaluation) {
-          logger.debug(
-            "Evaluation:",
-            JSON.stringify(result.evaluation, null, 2),
-          );
-        }
-      }
-
-      if (!globalSession.getCurrentSessionId()) {
-        await this.flushLangfuseTraces();
-        process.exit(0);
-      }
+      // Handle successful result
+      await CLICommandFactory.handleGenerateSuccess(
+        result,
+        options,
+        { isVideoMode, isPPTMode, isAvatarMode, isMusicMode },
+        spinner,
+      );
     } catch (error) {
       if (spinner) {
         spinner.fail();
@@ -1750,7 +3238,7 @@ export class CLICommandFactory {
     let fullContent = "";
 
     for (const chunk of chunks) {
-      process.stdout.write(chunk);
+      await animatedWrite(chunk);
       fullContent += chunk;
       await new Promise((resolve) => setTimeout(resolve, 50)); // Simulate streaming delay
     }
@@ -1774,7 +3262,7 @@ export class CLICommandFactory {
         context: contextMetadata as JsonValue,
       };
 
-      const mockGenerateResult: GenerateResult = {
+      const mockGenerateResult: CliGenerateResult = {
         success: true,
         content: fullContent,
         analytics: mockAnalytics,
@@ -1783,7 +3271,7 @@ export class CLICommandFactory {
       };
 
       const analyticsDisplay =
-        this.formatAnalyticsForTextMode(mockGenerateResult);
+        CLICommandFactory.formatAnalyticsForTextMode(mockGenerateResult);
       logger.always(analyticsDisplay);
     }
 
@@ -1813,7 +3301,7 @@ export class CLICommandFactory {
     }
 
     if (!globalSession.getCurrentSessionId()) {
-      await this.flushLangfuseTraces();
+      await CLICommandFactory.flushLangfuseTraces();
       process.exit(0);
     }
   }
@@ -1828,7 +3316,9 @@ export class CLICommandFactory {
     contextMetadata: Partial<BaseContext> | undefined,
   ): Promise<string> {
     const sdk = globalSession.getOrCreateNeuroLink();
-    const sessionVariables = globalSession.getSessionVariables();
+    const sessionVariables = CLICommandFactory.normalizeLoopSessionVariables(
+      globalSession.getSessionVariables(),
+    );
     const enhancedOptions = { ...options, ...sessionVariables };
     const sessionId = globalSession.getCurrentSessionId();
     const context = sessionId
@@ -1852,65 +3342,202 @@ export class CLICommandFactory {
       argv.file as string | string[] | undefined,
     );
 
-    const stream = await sdk.stream({
-      input: {
-        text: inputText,
-        ...(imageBuffers && { images: imageBuffers }),
-        ...(csvFiles && { csvFiles }),
-        ...(pdfFiles && { pdfFiles }),
-        ...(videoFiles && { videoFiles }),
-        ...(files && { files }),
-      },
-      csvOptions: {
-        maxRows: argv.csvMaxRows as number | undefined,
-        formatStyle: argv.csvFormat as "raw" | "markdown" | "json" | undefined,
-      },
-      videoOptions: {
-        frames: argv.videoFrames as number | undefined,
-        quality: argv.videoQuality as number | undefined,
-        format: argv.videoFormat as "jpeg" | "png" | undefined,
-        transcribeAudio: argv.transcribeAudio as boolean | undefined,
-      },
-      provider: enhancedOptions.provider as string | undefined,
-      model: enhancedOptions.model as string | undefined,
-      temperature: enhancedOptions.temperature as number | undefined,
-      maxTokens: enhancedOptions.maxTokens as number | undefined,
-      systemPrompt: enhancedOptions.systemPrompt as string | undefined,
-      timeout: enhancedOptions.timeout
-        ? (enhancedOptions.timeout as number) * 1000
-        : undefined,
-      disableTools: enhancedOptions.disableTools as boolean | undefined,
-      enableAnalytics: enhancedOptions.enableAnalytics as boolean | undefined,
-      enableEvaluation: enhancedOptions.enableEvaluation as boolean | undefined,
-      evaluationDomain: enhancedOptions.evaluationDomain as string | undefined,
-      toolUsageContext: enhancedOptions.toolUsageContext as string | undefined,
-      context: context,
-      factoryConfig: enhancedOptions.domain
-        ? {
-            domainType: enhancedOptions.domain as string,
-            enhancementType: "domain-configuration",
-            validateDomainData: true,
+    const runStream = async () =>
+      sdk.stream({
+        input: {
+          text: inputText,
+          ...(imageBuffers && { images: imageBuffers }),
+          ...(csvFiles && { csvFiles }),
+          ...(pdfFiles && { pdfFiles }),
+          ...(videoFiles && { videoFiles }),
+          ...(files && { files }),
+        },
+        csvOptions: {
+          maxRows: argv.csvMaxRows as number | undefined,
+          formatStyle: argv.csvFormat as
+            | "raw"
+            | "markdown"
+            | "json"
+            | undefined,
+        },
+        videoOptions: {
+          frames: argv.videoFrames as number | undefined,
+          quality: argv.videoQuality as number | undefined,
+          format: argv.videoFormat as "jpeg" | "png" | undefined,
+          transcribeAudio: argv.transcribeAudio as boolean | undefined,
+        },
+        provider: enhancedOptions.provider as string | undefined,
+        model: enhancedOptions.model as string | undefined,
+        temperature: enhancedOptions.temperature as number | undefined,
+        maxTokens: enhancedOptions.maxTokens as number | undefined,
+        topP: enhancedOptions.topP as number | undefined,
+        topK: enhancedOptions.topK as number | undefined,
+        stopSequences: enhancedOptions.stopSequences as string[] | undefined,
+        systemPrompt: enhancedOptions.systemPrompt as string | undefined,
+        timeout: enhancedOptions.timeout
+          ? (enhancedOptions.timeout as number) * 1000
+          : undefined,
+        disableTools: enhancedOptions.disableTools as boolean | undefined,
+        enabledToolNames: enhancedOptions.enabledToolNames as
+          | string[]
+          | undefined,
+        enableAnalytics: enhancedOptions.enableAnalytics as boolean | undefined,
+        enableEvaluation: enhancedOptions.enableEvaluation as
+          | boolean
+          | undefined,
+        evaluationDomain: enhancedOptions.evaluationDomain as
+          | string
+          | undefined,
+        toolUsageContext: enhancedOptions.toolUsageContext as
+          | string
+          | undefined,
+        context: context,
+        region: (options as Record<string, unknown>).region as
+          | string
+          | undefined,
+        thinkingConfig: createThinkingConfigFromRecord(
+          options as Record<string, unknown>,
+        ),
+        factoryConfig: enhancedOptions.domain
+          ? {
+              domainType: enhancedOptions.domain as string,
+              enhancementType: "domain-configuration",
+              validateDomainData: true,
+            }
+          : undefined,
+        // RAG configuration
+        rag: (argv.ragFiles as string[] | undefined)?.length
+          ? {
+              files: argv.ragFiles as string[],
+              strategy: argv.ragStrategy as ChunkingStrategy | undefined,
+              chunkSize: argv.ragChunkSize as number | undefined,
+              chunkOverlap: argv.ragChunkOverlap as number | undefined,
+              topK: argv.ragTopK as number | undefined,
+            }
+          : undefined,
+        // TTS configuration
+        tts: enhancedOptions.tts
+          ? {
+              enabled: true,
+              useAiResponse: true,
+              voice: enhancedOptions.ttsVoice as string | undefined,
+              provider: enhancedOptions.ttsProvider as string | undefined,
+              format:
+                (enhancedOptions.ttsFormat as
+                  | import("../../lib/types/index.js").TTSAudioFormat
+                  | undefined) || undefined,
+              speed: enhancedOptions.ttsSpeed as number | undefined,
+              quality: enhancedOptions.ttsQuality as
+                | "standard"
+                | "hd"
+                | undefined,
+              output: enhancedOptions.ttsOutput as string | undefined,
+              play: enhancedOptions.ttsPlay as boolean | undefined,
+            }
+          : undefined,
+        // STT configuration. m2: shared format helper (was duplicated with
+        // the generate handler; now lives in audioFormatDetector.ts).
+        stt: enhancedOptions.stt
+          ? await (async () => {
+              const streamSttAudioPath = enhancedOptions.inputAudio as
+                | string
+                | undefined;
+              // Fail fast on a missing --input-audio so a CLI typo doesn't
+              // turn into a confusing provider/validation error later
+              // (matches the generate path).
+              if (streamSttAudioPath && !fs.existsSync(streamSttAudioPath)) {
+                throw new Error(
+                  `--input-audio file not found: ${streamSttAudioPath}`,
+                );
+              }
+              const streamSttAudio = streamSttAudioPath
+                ? fs.readFileSync(streamSttAudioPath)
+                : undefined;
+              const { inferAudioFormatFromPath: inferFmt } =
+                await import("../../lib/utils/audioFormatDetector.js");
+              const streamSttFormat = inferFmt(streamSttAudioPath);
+              return {
+                enabled: true as const,
+                provider: enhancedOptions.sttProvider as string | undefined,
+                language: enhancedOptions.sttLanguage as string | undefined,
+                ...(streamSttAudio && { audio: streamSttAudio }),
+                ...(streamSttFormat && { format: streamSttFormat }),
+              };
+            })()
+          : undefined,
+      });
+    const stream = await runStream();
+
+    const streamResult = await CLICommandFactory.processStreamWithTimeout(
+      stream,
+      options,
+    );
+
+    await CLICommandFactory.displayStreamResults(
+      stream,
+      streamResult.content,
+      options,
+    );
+
+    // Handle image output from stream (image models emit image events)
+    if (streamResult.imageBase64) {
+      try {
+        let imagePath: string;
+        if (options.imageOutput) {
+          imagePath = path.resolve(options.imageOutput as string);
+          const dir = path.dirname(imagePath);
+          if (dir && dir !== "." && !fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
           }
-        : undefined,
-    });
+        } else {
+          const imageDir = "generated-images";
+          const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+          imagePath = path.join(imageDir, `image-${timestamp}.png`);
+          if (!fs.existsSync(imageDir)) {
+            fs.mkdirSync(imageDir, { recursive: true });
+          }
+        }
+        const imageBuffer = Buffer.from(streamResult.imageBase64, "base64");
+        fs.writeFileSync(imagePath, imageBuffer);
+        logger.always(`\n📸 Generated image saved to: ${imagePath}`);
+        logger.always(
+          `   Image size: ${(imageBuffer.length / 1024).toFixed(2)} KB`,
+        );
+      } catch (error) {
+        handleError(error as Error, "Failed to save streamed image");
+      }
+    }
 
-    const fullContent = await this.processStreamWithTimeout(stream, options);
-
-    await this.displayStreamResults(stream, fullContent, options);
-
-    return fullContent;
+    return streamResult.content;
   }
 
   /**
    * Process stream with timeout handling
    */
   private static async processStreamWithTimeout(
-    stream: { stream: AsyncIterable<{ content: string } | { type: "audio" }> },
+    stream: {
+      stream: AsyncIterable<
+        | { content: string }
+        | { type: "audio" }
+        | { type: "tts_audio" }
+        | { type: "image"; imageOutput: { base64: string } }
+      >;
+    },
     options: BaseCommandArgs & Record<string, unknown>,
-  ): Promise<string> {
+  ): Promise<{ content: string; imageBase64?: string }> {
     let fullContent = "";
+    let lastImageBase64: string | undefined;
     let contentReceived = false;
     const abortController = new AbortController();
+    // BZ-667: Wire SIGINT to abort stream gracefully
+    const abortHandler = createStreamAbortHandler();
+    abortHandler.signal.addEventListener(
+      "abort",
+      () => {
+        abortController.abort();
+      },
+      { once: true },
+    );
 
     // Create timeout promise for stream consumption (default: 30 seconds, respects user-provided timeout)
     const streamTimeout =
@@ -1938,23 +3565,43 @@ export class CLICommandFactory {
       });
     });
 
+    const streamIterator = stream.stream[Symbol.asyncIterator]();
     try {
       // Process the stream with timeout handling
-      const streamIterator = stream.stream[Symbol.asyncIterator]();
       let timeoutActive = true;
+
+      // BZ-667: Create an abort promise that rejects when the user presses Ctrl+C,
+      // so we can race it against streamIterator.next() and unblock pending reads.
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (abortHandler.signal.aborted) {
+          reject(new DOMException("Stream aborted", "AbortError"));
+          return;
+        }
+        abortHandler.signal.addEventListener(
+          "abort",
+          () => {
+            reject(new DOMException("Stream aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      });
 
       while (true) {
         let nextResult;
 
         if (timeoutActive && !contentReceived) {
-          // Race between next chunk and timeout for first chunk only
+          // Race between next chunk, timeout, and abort signal
           nextResult = await Promise.race([
             streamIterator.next(),
             timeoutPromise,
+            abortPromise,
           ]);
         } else {
-          // No timeout for subsequent chunks
-          nextResult = await streamIterator.next();
+          // Race between next chunk and abort signal
+          nextResult = await Promise.race([
+            streamIterator.next(),
+            abortPromise,
+          ]);
         }
 
         if (nextResult.done) {
@@ -1979,24 +3626,70 @@ export class CLICommandFactory {
           !!o &&
           typeof o === "object" &&
           typeof (o as Record<string, unknown>).content === "string";
-        const isAudio = (o: unknown): o is { type: "audio" } =>
-          !!o &&
-          typeof o === "object" &&
-          (o as Record<string, unknown>).type === "audio";
+        const isAudio = (o: unknown): o is { type: "audio" | "tts_audio" } => {
+          if (!o || typeof o !== "object") {
+            return false;
+          }
+          const t = (o as Record<string, unknown>).type;
+          return t === "audio" || t === "tts_audio";
+        };
+        const isImage = (
+          o: unknown,
+        ): o is { type: "image"; imageOutput: { base64: string } } => {
+          if (!o || typeof o !== "object") {
+            return false;
+          }
+          const record = o as Record<string, unknown>;
+          if (record.type !== "image") {
+            return false;
+          }
+          if (!record.imageOutput || typeof record.imageOutput !== "object") {
+            return false;
+          }
+          return (
+            typeof (record.imageOutput as Record<string, unknown>).base64 ===
+            "string"
+          );
+        };
 
         if (isText(evt)) {
-          process.stdout.write(evt.content);
+          await animatedWrite(evt.content);
           fullContent += evt.content;
         } else if (isAudio(evt)) {
           if (options.debug && !options.quiet) {
             process.stdout.write("[audio-chunk]");
           }
+        } else if (isImage(evt)) {
+          lastImageBase64 = evt.imageOutput.base64;
+          if (options.debug && !options.quiet) {
+            process.stdout.write("[image-received]");
+          }
         }
       }
     } catch (error) {
       abortController.abort(); // Clean up timeout
+      // BZ-667: Close the stream iterator so the provider connection is released.
+      // Wrap in try/catch to prevent cleanup failures from masking the original error.
+      try {
+        await streamIterator.return?.();
+      } catch {
+        // Iterator cleanup failed — swallow so the original error propagates
+      }
+      abortHandler.cleanup();
+      // BZ-667: Handle graceful abort — return partial content instead of throwing
+      if (
+        abortHandler.signal.aborted ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
+        if (!options.quiet) {
+          process.stdout.write("\n");
+        }
+        return { content: fullContent, imageBase64: lastImageBase64 };
+      }
       throw error;
     }
+
+    abortHandler.cleanup();
 
     if (!contentReceived) {
       throw new Error(
@@ -2009,7 +3702,7 @@ export class CLICommandFactory {
       process.stdout.write("\n");
     }
 
-    return fullContent;
+    return { content: fullContent, imageBase64: lastImageBase64 };
   }
 
   /**
@@ -2037,8 +3730,8 @@ export class CLICommandFactory {
         model: stream.model,
         toolsUsed: stream.toolCalls?.map((tc) => tc.toolName) || [],
       };
-      const analyticsDisplay = this.formatAnalyticsForTextMode(
-        streamAnalytics as unknown as GenerateResult,
+      const analyticsDisplay = CLICommandFactory.formatAnalyticsForTextMode(
+        streamAnalytics as unknown as CliGenerateResult,
       );
       logger.always(analyticsDisplay);
     }
@@ -2092,7 +3785,7 @@ export class CLICommandFactory {
 
     // Debug output for streaming
     if (options.debug) {
-      await this.logStreamDebugInfo({
+      await CLICommandFactory.logStreamDebugInfo({
         provider: options.provider as string,
         model: options.model as string,
       });
@@ -2135,6 +3828,10 @@ export class CLICommandFactory {
   private static async handleStdinInput(
     argv: StreamCommandArgs,
   ): Promise<void> {
+    // STT-only flow: --stt --input-audio <file> with no text prompt is now
+    // valid (the stream pipeline transcribes the audio and uses the result
+    // as the prompt). Skip the stdin/empty-input rejection in that case.
+    const isSttOnly = !!argv.stt && !!argv.inputAudio;
     if (!argv.input && !process.stdin.isTTY) {
       let stdinData = "";
       process.stdin.setEncoding("utf8");
@@ -2143,9 +3840,17 @@ export class CLICommandFactory {
       }
       argv.input = stdinData.trim();
       if (!argv.input) {
+        if (isSttOnly) {
+          argv.input = "";
+          return;
+        }
         throw new Error("No input received from stdin");
       }
     } else if (!argv.input) {
+      if (isSttOnly) {
+        argv.input = "";
+        return;
+      }
       throw new Error(
         'Input required. Use: neurolink stream "your prompt" or echo "prompt" | neurolink stream',
       );
@@ -2156,9 +3861,14 @@ export class CLICommandFactory {
    * Execute the stream command
    */
   private static async executeStream(argv: StreamCommandArgs) {
-    await this.handleStdinInput(argv);
+    await CLICommandFactory.handleStdinInput(argv);
 
-    const options = this.processOptions(argv);
+    const options = CLICommandFactory.processOptions(argv);
+
+    // Validate Anthropic subscription options if using Anthropic provider
+    CLICommandFactory.validateAnthropicSubscriptionOptions(
+      options as Record<string, unknown>,
+    );
 
     if (!options.quiet) {
       logger.always(chalk.blue("🔄 Streaming..."));
@@ -2170,28 +3880,28 @@ export class CLICommandFactory {
         await new Promise((resolve) => setTimeout(resolve, options.delay));
       }
 
-      const { inputText, contextMetadata } = await this.processStreamContext(
-        argv,
-        options,
-      );
+      CLICommandFactory.validateCliInputFiles(argv);
+
+      const { inputText, contextMetadata } =
+        await CLICommandFactory.processStreamContext(argv, options);
 
       // Handle dry-run mode for testing
       if (options.dryRun) {
-        await this.executeDryRunStream(options, contextMetadata);
+        await CLICommandFactory.executeDryRunStream(options, contextMetadata);
         return;
       }
 
-      const fullContent = await this.executeRealStream(
+      const fullContent = await CLICommandFactory.executeRealStream(
         argv,
         options,
         inputText,
         contextMetadata,
       );
 
-      await this.handleStreamOutput(options, fullContent);
+      await CLICommandFactory.handleStreamOutput(options, fullContent);
 
       if (!globalSession.getCurrentSessionId()) {
-        await this.flushLangfuseTraces();
+        await CLICommandFactory.flushLangfuseTraces();
         process.exit(0);
       }
     } catch (error) {
@@ -2203,7 +3913,13 @@ export class CLICommandFactory {
    * Execute the batch command
    */
   private static async executeBatch(argv: BatchCommandArgs) {
-    const options = this.processOptions(argv);
+    const options = CLICommandFactory.processOptions(argv);
+
+    // Validate Anthropic subscription options if using Anthropic provider
+    CLICommandFactory.validateAnthropicSubscriptionOptions(
+      options as Record<string, unknown>,
+    );
+
     const spinner = options.quiet ? null : ora().start();
 
     try {
@@ -2241,7 +3957,9 @@ export class CLICommandFactory {
       }> = [];
 
       const sdk = globalSession.getOrCreateNeuroLink();
-      const sessionVariables = globalSession.getSessionVariables();
+      const sessionVariables = CLICommandFactory.normalizeLoopSessionVariables(
+        globalSession.getSessionVariables(),
+      );
       const enhancedOptions = { ...options, ...sessionVariables };
       const sessionId = globalSession.getCurrentSessionId();
 
@@ -2292,32 +4010,42 @@ export class CLICommandFactory {
             ? { ...contextMetadata, sessionId }
             : contextMetadata;
 
-          const result = await sdk.generate({
-            input: { text: inputText },
-            provider: enhancedOptions.provider,
-            model: enhancedOptions.model,
-            temperature: enhancedOptions.temperature,
-            maxTokens: enhancedOptions.maxTokens,
-            systemPrompt: enhancedOptions.systemPrompt,
-            timeout: enhancedOptions.timeout
-              ? enhancedOptions.timeout * 1000
-              : undefined,
-            disableTools: enhancedOptions.disableTools,
-            evaluationDomain: enhancedOptions.evaluationDomain as
-              | string
-              | undefined,
-            toolUsageContext: enhancedOptions.toolUsageContext as
-              | string
-              | undefined,
-            context: context,
-            factoryConfig: enhancedOptions.domain
-              ? {
-                  domainType: enhancedOptions.domain as string,
-                  enhancementType: "domain-configuration",
-                  validateDomainData: true,
-                }
-              : undefined,
-          });
+          const runBatchGenerate = () =>
+            sdk.generate({
+              input: { text: inputText },
+              provider: enhancedOptions.provider,
+              model: enhancedOptions.model,
+              temperature: enhancedOptions.temperature,
+              maxTokens: enhancedOptions.maxTokens,
+              topP: enhancedOptions.topP as number | undefined,
+              topK: enhancedOptions.topK as number | undefined,
+              stopSequences: enhancedOptions.stopSequences as
+                | string[]
+                | undefined,
+              systemPrompt: enhancedOptions.systemPrompt,
+              timeout: enhancedOptions.timeout
+                ? enhancedOptions.timeout * 1000
+                : undefined,
+              disableTools: enhancedOptions.disableTools,
+              enabledToolNames: enhancedOptions.enabledToolNames as
+                | string[]
+                | undefined,
+              evaluationDomain: enhancedOptions.evaluationDomain as
+                | string
+                | undefined,
+              toolUsageContext: enhancedOptions.toolUsageContext as
+                | string
+                | undefined,
+              context: context,
+              factoryConfig: enhancedOptions.domain
+                ? {
+                    domainType: enhancedOptions.domain as string,
+                    enhancementType: "domain-configuration",
+                    validateDomainData: true,
+                  }
+                : undefined,
+            });
+          const result = await runBatchGenerate();
 
           results.push({ prompt: prompts[i], response: result.content });
 
@@ -2348,10 +4076,10 @@ export class CLICommandFactory {
       }
 
       // Handle output with universal formatting
-      this.handleOutput(results, options);
+      CLICommandFactory.handleOutput(results, options);
 
       if (!globalSession.getCurrentSessionId()) {
-        await this.flushLangfuseTraces();
+        await CLICommandFactory.flushLangfuseTraces();
         process.exit(0);
       }
     } catch (error) {
@@ -2366,7 +4094,7 @@ export class CLICommandFactory {
    * Execute config export command
    */
   private static async executeConfigExport(argv: BaseCommandArgs) {
-    const options = this.processOptions(argv);
+    const options = CLICommandFactory.processOptions(argv);
 
     try {
       const config = {
@@ -2393,7 +4121,7 @@ export class CLICommandFactory {
         timestamp: new Date().toISOString(),
       };
 
-      this.handleOutput(config, options);
+      CLICommandFactory.handleOutput(config, options);
     } catch (error) {
       handleError(error as Error, "Configuration export");
     }
@@ -2403,23 +4131,22 @@ export class CLICommandFactory {
    * Execute get best provider command
    */
   private static async executeGetBestProvider(argv: BaseCommandArgs) {
-    const options = this.processOptions(argv);
+    const options = CLICommandFactory.processOptions(argv);
 
     try {
-      const { getBestProvider } = await import(
-        "../../lib/utils/providerUtils.js"
-      );
+      const { getBestProvider } =
+        await import("../../lib/utils/providerUtils.js");
       const bestProvider = await getBestProvider();
 
       if (options.format === "json") {
-        this.handleOutput({ provider: bestProvider }, options);
+        CLICommandFactory.handleOutput({ provider: bestProvider }, options);
       } else {
         if (!options.quiet) {
           logger.always(
             chalk.green(`🎯 Best available provider: ${bestProvider}`),
           );
         } else {
-          this.handleOutput(bestProvider, options);
+          CLICommandFactory.handleOutput(bestProvider, options);
         }
       }
     } catch (error) {
@@ -2431,7 +4158,7 @@ export class CLICommandFactory {
    * Execute memory stats command
    */
   private static async executeMemoryStats(argv: BaseCommandArgs) {
-    const options = this.processOptions(argv);
+    const options = CLICommandFactory.processOptions(argv);
     const spinner = options.quiet
       ? null
       : ora("🧠 Getting memory stats...").start();
@@ -2451,7 +4178,7 @@ export class CLICommandFactory {
           spinner.succeed(chalk.green("✅ Memory stats retrieved (dry-run)"));
         }
 
-        this.handleOutput(mockStats, options);
+        CLICommandFactory.handleOutput(mockStats, options);
         return;
       }
 
@@ -2462,7 +4189,7 @@ export class CLICommandFactory {
       }
 
       if (options.format === "json") {
-        this.handleOutput(stats, options);
+        CLICommandFactory.handleOutput(stats, options);
       } else {
         logger.always(chalk.blue("📊 Conversation Memory Stats:"));
         logger.always(`   Total Sessions: ${stats.totalSessions}`);
@@ -2493,7 +4220,7 @@ export class CLICommandFactory {
   private static async executeMemoryHistory(
     argv: BaseCommandArgs & { sessionId: string },
   ) {
-    const options = this.processOptions(argv);
+    const options = CLICommandFactory.processOptions(argv);
     const spinner = options.quiet
       ? null
       : ora(`🧠 Getting history for ${argv.sessionId}...`).start();
@@ -2522,7 +4249,7 @@ export class CLICommandFactory {
           );
         }
 
-        this.handleOutput(mockHistory, options);
+        CLICommandFactory.handleOutput(mockHistory, options);
         return;
       }
 
@@ -2544,7 +4271,7 @@ export class CLICommandFactory {
       }
 
       if (options.format === "json") {
-        this.handleOutput(history, options);
+        CLICommandFactory.handleOutput(history, options);
       } else {
         logger.always(
           chalk.blue(`💬 Conversation History (${argv.sessionId}):`),
@@ -2577,7 +4304,7 @@ export class CLICommandFactory {
   private static async executeMemoryClear(
     argv: BaseCommandArgs & { sessionId?: string },
   ) {
-    const options = this.processOptions(argv);
+    const options = CLICommandFactory.processOptions(argv);
     const isAllSessions = !argv.sessionId;
     const target = isAllSessions ? "all sessions" : `session ${argv.sessionId}`;
     const spinner = options.quiet
@@ -2604,7 +4331,7 @@ export class CLICommandFactory {
           message: `${isAllSessions ? "All sessions" : "Session"} would be cleared`,
         };
 
-        this.handleOutput(result, options);
+        CLICommandFactory.handleOutput(result, options);
         return;
       }
 
@@ -2644,7 +4371,7 @@ export class CLICommandFactory {
           action: isAllSessions ? "clear_all" : "clear_session",
           sessionId: argv.sessionId || null,
         };
-        this.handleOutput(result, options);
+        CLICommandFactory.handleOutput(result, options);
       } else if (!success && !isAllSessions) {
         logger.always(
           chalk.yellow(
@@ -2707,7 +4434,7 @@ export class CLICommandFactory {
         "        generate|gen)\n" +
         '            case "${prev}" in\n' +
         "                --provider|-p)\n" +
-        '                    COMPREPLY=( $(compgen -W "auto openai bedrock vertex googleVertex anthropic azure google-ai huggingface ollama mistral litellm" -- ${cur}) )\n' +
+        '                    COMPREPLY=( $(compgen -W "auto openai openai-compatible openrouter or bedrock vertex googleVertex anthropic anthropic-subscription azure google-ai google-ai-studio huggingface ollama mistral litellm sagemaker deepseek ds nvidia-nim nim lm-studio lmstudio llamacpp llama.cpp xai grok groq cohere together-ai together fireworks perplexity pplx cloudflare workers-ai cf-ai replicate voyage voyage-ai jina jina-ai stability stability-ai sd ideogram recraft" -- ${cur}) )\n' +
         "                    return 0\n" +
         "                    ;;\n" +
         "                --format|-f|--output-format)\n" +
@@ -2833,9 +4560,8 @@ export class CLICommandFactory {
   private static async flushLangfuseTraces(): Promise<void> {
     try {
       logger.debug("[CLI] Flushing Langfuse traces before exit...");
-      const { flushOpenTelemetry } = await import(
-        "../../lib/services/server/ai/observability/instrumentation.js"
-      );
+      const { flushOpenTelemetry } =
+        await import("../../lib/services/server/ai/observability/instrumentation.js");
       await flushOpenTelemetry();
       logger.debug("[CLI] Langfuse traces flushed successfully");
     } catch (error) {

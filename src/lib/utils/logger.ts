@@ -14,7 +14,30 @@
  * - Tabular data display
  */
 
-import type { LogEntry, LogLevel } from "../types/utilities.js";
+import type { LogEntry, LogLevel } from "../types/index.js";
+
+// OTel trace context for log correlation (optional — gracefully no-ops if OTel not initialized)
+let traceApi: typeof import("@opentelemetry/api") | null = null;
+let traceApiPromise: Promise<
+  typeof import("@opentelemetry/api") | null
+> | null = null;
+
+async function getTraceApi(): Promise<
+  typeof import("@opentelemetry/api") | null
+> {
+  if (!traceApiPromise) {
+    traceApiPromise = import("@opentelemetry/api")
+      .then((mod) => {
+        traceApi = mod;
+        return mod;
+      })
+      .catch(() => null);
+  }
+  return traceApiPromise;
+}
+
+// Eagerly kick off the import so the cached value is available for synchronous callers
+void getTraceApi();
 
 // Pre-computed uppercase log levels for performance optimization
 const UPPERCASE_LOG_LEVELS: Record<LogLevel, string> = {
@@ -116,7 +139,93 @@ class NeuroLinkLogger {
   }
 
   /**
+   * Extracts current OTel trace context (trace_id, span_id) if available.
+   * Returns empty object if OTel is not initialized or no active span exists.
+   */
+  private getTraceContext(): {
+    trace_id?: string;
+    span_id?: string;
+    trace_flags?: string;
+  } {
+    if (!traceApi) {
+      return {};
+    }
+    try {
+      const span = traceApi.trace.getSpan(traceApi.context.active());
+      if (!span) {
+        return {};
+      }
+      const spanContext = span.spanContext();
+      if (
+        !spanContext ||
+        spanContext.traceId === "00000000000000000000000000000000"
+      ) {
+        return {};
+      }
+      return {
+        trace_id: spanContext.traceId,
+        span_id: spanContext.spanId,
+        trace_flags: String(spanContext.traceFlags),
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Safely serialize data to fully expanded JSON string.
+   * Handles circular references and non-serializable values.
+   * Zero truncation — all nested objects and arrays are fully expanded.
+   */
+  private serializeData(data: unknown): string {
+    if (data === undefined || data === null) {
+      return String(data);
+    }
+    if (typeof data !== "object") {
+      return String(data);
+    }
+    try {
+      return JSON.stringify(data, (_key, value) => {
+        if (value instanceof Error) {
+          return {
+            name: value.name,
+            message: value.message,
+            stack: value.stack,
+          };
+        }
+        return value;
+      });
+    } catch {
+      // Handle circular references using a stack-based approach
+      // to avoid false "[Circular]" on diamond (shared) references
+      const ancestors: object[] = [];
+      try {
+        return JSON.stringify(data, function (_key, value) {
+          if (value instanceof Error) {
+            return {
+              name: value.name,
+              message: value.message,
+              stack: value.stack,
+            };
+          }
+          if (typeof value === "object" && value !== null) {
+            // Only flag actual circular (ancestor) references
+            if (ancestors.includes(value)) {
+              return "[Circular]";
+            }
+            ancestors.push(value);
+          }
+          return value;
+        });
+      } catch {
+        return "[Unserializable Object]";
+      }
+    }
+  }
+
+  /**
    * Outputs a log entry to the console based on the log level.
+   * Data is fully serialized to JSON — no [Object] or [Array] truncation.
    *
    * @param level - The log level (debug, info, warn, error).
    * @param prefix - The formatted log prefix.
@@ -135,10 +244,14 @@ class NeuroLinkLogger {
       warn: console.warn,
       error: console.error,
     }[level];
+    const traceCtx = this.getTraceContext();
+    const tracePrefix = traceCtx.trace_id
+      ? ` [trace_id=${traceCtx.trace_id} span_id=${traceCtx.span_id}]`
+      : "";
     if (data !== undefined && data !== null) {
-      logMethod(prefix, message, data);
+      logMethod(prefix + tracePrefix, message, this.serializeData(data));
     } else {
-      logMethod(prefix, message);
+      logMethod(prefix + tracePrefix, message);
     }
   }
 
@@ -390,6 +503,8 @@ export const logger = {
   table: (data: unknown) => {
     neuroLinkLogger.table(data);
   },
+  // Expose log-level check for gating expensive operations
+  shouldLog: (level: LogLevel) => neuroLinkLogger.shouldLog(level),
   // Expose structured logging methods
   setLogLevel: (level: LogLevel) => neuroLinkLogger.setLogLevel(level),
   getLogs: (level?: LogLevel) => neuroLinkLogger.getLogs(level),

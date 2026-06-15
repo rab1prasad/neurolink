@@ -34,6 +34,18 @@ npx tsx test/continuous-test-suite.ts --provider <provider-name>
 - `ollama` - Ollama (local models)
 - `litellm` - LiteLLM proxy
 - `sagemaker` - AWS SageMaker
+- `openrouter` - OpenRouter (300+ models)
+- `openai-compatible` - Any OpenAI-compatible endpoint
+- `deepseek` - DeepSeek (V3, R1)
+- `nvidia-nim` - NVIDIA NIM (Llama 3.3 70B, 400+ models)
+- `lm-studio` - LM Studio (local)
+- `llamacpp` - llama.cpp (local GGUF)
+
+Voice providers (tested via dedicated suites, see below):
+
+- `openai-tts`, `elevenlabs`, `google-tts`, `azure-tts` (TTS — `pnpm test:tts`)
+- `whisper`, `deepgram`, `azure-stt`, `google-stt` (STT — `pnpm test:voice`)
+- `openai-realtime`, `gemini-live` (realtime — `pnpm test:voice-server`)
 
 #### Test Coverage
 
@@ -260,6 +272,36 @@ cat /tmp/neurolink-sequential-tests/results-summary.txt
 
 ---
 
+## 🧪 Model-Specific Testing
+
+### Testing with Gemini 3 Models
+
+To test with specific Gemini 3 models on Vertex AI, use environment variables with the legacy test suite:
+
+```bash
+# Test with Gemini 3 Flash Preview
+TEST_PROVIDER=vertex TEST_MODEL=gemini-3-flash-preview pnpm test:legacy
+
+# Test with Gemini 3 Pro Preview
+TEST_PROVIDER=vertex TEST_MODEL=gemini-3-pro-preview pnpm test:legacy
+```
+
+#### Known Limitations
+
+**Zod Schema Tests with Gemini Models:**
+
+The Zod schema validation tests are automatically skipped when testing with Gemini models. This is due to a known limitation where Gemini does not currently support combining tool usage with JSON schema output constraints in the same request.
+
+When you see tests skipped with messages like:
+
+```
+⏭️ Skipping Zod schema test (Gemini does not support tools + JSON schema together)
+```
+
+This is expected behavior and not a test failure.
+
+---
+
 ## 🔍 Debugging Failed Tests
 
 ### View Detailed Logs
@@ -416,8 +458,8 @@ await testNewFeature(provider);
 
 ## 🔗 Related Documentation
 
-- [`../COMPREHENSIVE_REFACTORING_PLAN.md`](../COMPREHENSIVE_REFACTORING_PLAN.md) - Architecture and refactoring details
-- [`../PHASE_1_COMPLETION.md`](../PHASE_1_COMPLETION.md) - Phase 1 completion status
+- `../COMPREHENSIVE_REFACTORING_PLAN.md` - Architecture and refactoring details
+- `../PHASE_1_COMPLETION.md` - Phase 1 completion status
 - [`../CLAUDE.md`](../CLAUDE.md) - Developer guide for Claude Code
 - [`../README.md`](../README.md) - Main project documentation
 

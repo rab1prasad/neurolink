@@ -3,7 +3,7 @@
  */
 
 import { ErrorCategory, ErrorSeverity } from "../constants/enums.js";
-import type { UnifiedGenerationOptions } from "./generateTypes.js";
+import type { UnifiedGenerationOptions } from "./generate.js";
 import type { ExecutionContext } from "./tools.js";
 
 /**
@@ -72,6 +72,26 @@ export type LogEntry = {
   timestamp: Date;
   /** Optional additional data associated with the log entry (objects, arrays, etc.) */
   data?: unknown;
+};
+
+/**
+ * Logger interface matching the logger object shape
+ * Used for SDK tool contexts and other components that need a logger
+ */
+export type Logger = {
+  debug: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+  always: (...args: unknown[]) => void;
+  table: (data: unknown) => void;
+  setLogLevel: (level: LogLevel) => void;
+  getLogs: (level?: LogLevel) => LogEntry[];
+  clearLogs: () => void;
+  setEventEmitter: (emitter: {
+    emit: (event: string, ...args: unknown[]) => boolean;
+  }) => void;
+  clearEventEmitter: () => void;
 };
 
 // Structured error interface
@@ -206,4 +226,111 @@ export type EnvVarValidationResult = {
   missingVars: string[];
   invalidVars: string[];
   warnings: string[];
+};
+
+/**
+ * Cached image entry structure for image cache
+ */
+export type CachedImage = {
+  /** The image data as a base64 data URI */
+  dataUri: string;
+  /** Content type of the image (e.g., "image/jpeg") */
+  contentType: string;
+  /** Size of the image in bytes */
+  size: number;
+  /** SHA-256 hash of the image content for deduplication */
+  contentHash: string;
+  /** Timestamp when the entry was created */
+  createdAt: number;
+  /** Timestamp of last access */
+  lastAccessedAt: number;
+  /** Number of times this entry was accessed */
+  accessCount: number;
+};
+
+/**
+ * Configuration options for the image cache
+ */
+export type ImageCacheConfig = {
+  /** Maximum number of entries in the cache (default: 100) */
+  maxSize?: number;
+  /** Time-to-live in milliseconds (default: 30 minutes) */
+  ttlMs?: number;
+  /** Maximum size per image in bytes (default: 10MB) */
+  maxImageSize?: number;
+};
+
+/**
+ * Cache statistics for monitoring
+ */
+export type ImageCacheStats = {
+  /** Number of cache hits */
+  hits: number;
+  /** Number of cache misses */
+  misses: number;
+  /** Number of entries evicted due to size limits */
+  evictions: number;
+  /** Number of entries expired due to TTL */
+  expirations: number;
+  /** Total number of requests */
+  totalRequests: number;
+  /** Current number of entries in cache */
+  size: number;
+  /** Total size of cached images in bytes */
+  totalBytes: number;
+  /** Cache hit rate as percentage */
+  hitRate: number;
+};
+
+// =============================================================================
+// RATE LIMITER (from utils/rateLimiter.ts)
+// =============================================================================
+
+/**
+ * Pending request held by TokenBucketRateLimiter's queue.
+ * Named RateLimiterPendingRequest to disambiguate from the MCP
+ * PendingRequest in mcp.ts (Rule 9).
+ */
+export type RateLimiterPendingRequest = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timestamp: number;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
+};
+
+// =============================================================================
+// TOOL END EMITTER (from utils/toolEndEmitter.ts)
+// =============================================================================
+
+/**
+ * Shape of a completed tool result as returned by the AI SDK in
+ * `onStepFinish`. Both `output` (AI SDK v4) and `result` (older shape)
+ * are supported so the helper works across SDK versions.
+ */
+export type StepToolResult = {
+  toolName: string;
+  output?: unknown;
+  result?: unknown;
+  error?: string;
+};
+
+// =============================================================================
+// JSON COERCION (from utils/json/coerce.ts)
+// =============================================================================
+
+/**
+ * Result of coercing arbitrary model text into canonical, valid JSON.
+ * `content` is a JSON.stringify of the recovered object; `structuredData` is
+ * the parsed object itself.
+ */
+export type JsonCoercionResult = {
+  content: string;
+  structuredData: unknown;
+  /** True when jsonrepair altered the model text to make it parse. */
+  repaired: boolean;
+  /**
+   * True when the recovered object came from a truncated (unclosed) span —
+   * the response likely hit the output-token cap and data may be incomplete.
+   */
+  truncated: boolean;
 };

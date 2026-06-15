@@ -14,14 +14,15 @@ keywords: google ai studio, gemini, free tier, google AI, generative AI
 
 Google AI Studio (formerly MakerSuite) provides direct access to Google's Gemini AI models with simple API key authentication and one of the most generous free tiers available. Perfect for development, prototyping, and low-volume production workloads.
 
-!!! tip "Best Free Tier for Production"
-Google AI Studio offers one of the most generous free tiers: 1,500 requests/day with Gemini 2.0 Flash. Perfect for startups and small projects to run in production at zero cost.
+:::tip[Best Free Tier for Production]
+Google AI Studio offers one of the most generous free tiers: 1,500 requests/day with Gemini 2.5 Flash. Perfect for startups and small projects to run in production at zero cost.
+:::
 
 ### Key Benefits
 
 - **🆓 Generous Free Tier**: 15 requests/minute, 1M tokens/minute, 1500 requests/day
 - **⚡ Fast Setup**: Single API key, no service accounts required
-- **🎯 Gemini Models**: Access to Gemini 2.0 Flash, Gemini 1.5 Pro, and more
+- **🎯 Gemini Models**: Access to Gemini 3.1/3 (with Extended Thinking), Gemini 2.5 Pro/Flash, and more
 - **💰 Cost-Effective**: Free tier covers most development needs
 - **🔧 Simple Auth**: No complex GCP setup needed
 - **📊 Multimodal**: Text, images, video, and audio support
@@ -63,7 +64,7 @@ npx @juspay/neurolink generate "Hello from Google AI!" --provider google-ai
 # CLI - Use specific Gemini model
 npx @juspay/neurolink generate "Explain quantum physics" \
   --provider google-ai \
-  --model "gemini-2.0-flash"
+  --model "gemini-2.5-flash"
 
 # SDK
 node -e "
@@ -91,7 +92,7 @@ const { NeuroLink } = require('@juspay/neurolink');
 | **Tokens per Minute (TPM)**   | 1M TPM          | Combined input + output          |
 | **Requests per Day (RPD)**    | 1,500 RPD       | Rolling 24-hour window           |
 | **Concurrent Requests**       | 15              | Max simultaneous requests        |
-| **Context Length**            | Up to 2M tokens | Model-dependent (Gemini 1.5 Pro) |
+| **Context Length**            | Up to 1M tokens | Model-dependent (Gemini 2.5 Pro) |
 
 ### Free Tier Capacity Estimate
 
@@ -124,28 +125,83 @@ You should consider upgrading to **Vertex AI** when:
 
 ### Available Gemini Models
 
-| Model                | Description         | Context    | Best For                    | Free Tier |
-| -------------------- | ------------------- | ---------- | --------------------------- | --------- |
-| **gemini-2.0-flash** | Latest fast model   | 1M tokens  | Speed, real-time apps       | ✅ Yes    |
-| **gemini-1.5-pro**   | Most capable model  | 2M tokens  | Complex reasoning, analysis | ✅ Yes    |
-| **gemini-1.5-flash** | Balanced model      | 1M tokens  | General tasks               | ✅ Yes    |
-| **gemini-1.0-pro**   | Legacy stable model | 32K tokens | Production stability        | ✅ Yes    |
+| Model                 | Model ID                        | Context Window | Max Output | Multimodal                      |
+| --------------------- | ------------------------------- | -------------- | ---------- | ------------------------------- |
+| Gemini 3.1 Pro        | `gemini-3.1-pro-preview`        | 1,048,576      | 65,536     | Text, images, audio, video, PDF |
+| Gemini 3 Flash        | `gemini-3-flash-preview`        | 1,048,576      | 65,536     | Text, images, audio, video, PDF |
+| Gemini 3.1 Flash Lite | `gemini-3.1-flash-lite-preview` | 1,048,576      | 65,536     | Text, images, audio, video      |
+| Gemini 2.5 Pro        | `gemini-2.5-pro`                | 1,048,576      | 65,536     | Text, images, audio, video, PDF |
+| **Gemini 2.5 Flash**  | `gemini-2.5-flash`              | 1,048,576      | 65,536     | Text, images, audio, video      |
+| Gemini 2.5 Flash Lite | `gemini-2.5-flash-lite`         | 1,048,576      | 65,536     | Text, images, audio, video      |
+
+:::note[Gemini 3 Models are in Preview]
+Gemini 3.1 Pro, Gemini 3 Flash, and Gemini 3.1 Flash Lite carry the `-preview` suffix and may change behavior before reaching general availability. Pin to a specific model ID in production and monitor the [Gemini API changelog](https://ai.google.dev/gemini-api/docs/changelog) for graduation announcements and deprecation timelines.
+:::
+
+### Deprecated / Retiring Models
+
+| Model            | Model ID           | Status                | Notes                               |
+| ---------------- | ------------------ | --------------------- | ----------------------------------- |
+| Gemini 2.0 Flash | `gemini-2.0-flash` | Retiring June 1, 2026 | Migrate to `gemini-2.5-flash`       |
+| Gemini 1.5 Pro   | `gemini-1.5-pro`   | **SHUT DOWN**         | Returns 404. Use `gemini-2.5-pro`   |
+| Gemini 1.5 Flash | `gemini-1.5-flash` | **SHUT DOWN**         | Returns 404. Use `gemini-2.5-flash` |
+
+### Embedding Models
+
+| Model                      | Model ID                     | Dimensions | Multimodal                 | Status                         |
+| -------------------------- | ---------------------------- | ---------- | -------------------------- | ------------------------------ |
+| Gemini Embedding 001       | `gemini-embedding-001`       | 3,072      | Text only                  | Current default                |
+| Gemini Embedding 2 Preview | `gemini-embedding-2-preview` | 3,072      | Text, images, video, audio | NEW -- preview                 |
+| Text Embedding 004         | `text-embedding-004`         | 768        | Text only                  | **Was shut down** Jan 14, 2026 |
+
+Configure the embedding model via the `GOOGLE_AI_EMBEDDING_MODEL` environment variable or pass it directly:
+
+```typescript
+// Use default embedding model (gemini-embedding-001)
+const embedding = await ai.embed({
+  input: "Hello world",
+  provider: "google-ai",
+});
+
+// Use the new multimodal embedding model
+const embedding = await ai.embed({
+  input: "Hello world",
+  provider: "google-ai",
+  model: "gemini-embedding-2-preview",
+});
+```
 
 ### Model Selection by Use Case
 
 ```typescript
+// Extended thinking for complex problems (Gemini 3.1)
+const deepReasoning = await ai.generate({
+  input: { text: "Solve this complex mathematical proof..." },
+  provider: "google-ai",
+  model: "gemini-3.1-pro-preview", // Best reasoning with thinking
+  thinkingConfig: { thinkingLevel: "high" }, // Enable extended thinking
+});
+
+// Fast reasoning with thinking (Gemini 3 Flash)
+const fastReasoning = await ai.generate({
+  input: { text: "Analyze this code and find bugs" },
+  provider: "google-ai",
+  model: "gemini-3-flash-preview", // Fast + reasoning
+  thinkingConfig: { thinkingLevel: "medium" },
+});
+
 // Real-time applications (speed priority)
 const realtime = await ai.generate({
   input: { text: "Quick customer query" },
   provider: "google-ai",
-  model: "gemini-2.0-flash", // Fastest response
+  model: "gemini-2.5-flash", // Fastest response (default)
 });
 
 // Complex reasoning (quality priority)
 const complex = await ai.generate({
   input: { text: "Analyze this complex business scenario..." },
   provider: "google-ai",
-  model: "gemini-1.5-pro", // Most capable, 2M context
+  model: "gemini-2.5-pro", // Most capable
 });
 
 // Multimodal processing
@@ -155,14 +211,14 @@ const multimodal = await ai.generate({
     images: ["data:image/jpeg;base64,..."],
   },
   provider: "google-ai",
-  model: "gemini-1.5-pro", // Best for multimodal
+  model: "gemini-2.5-pro", // Best for multimodal
 });
 
 // Cost-optimized general tasks
 const general = await ai.generate({
   input: { text: "General customer support query" },
   provider: "google-ai",
-  model: "gemini-1.5-flash", // Balanced performance/cost
+  model: "gemini-2.5-flash-lite", // Balanced performance/cost
 });
 ```
 
@@ -170,14 +226,119 @@ const general = await ai.generate({
 
 ```
 Model Context Limits:
-- gemini-2.0-flash:    1,000,000 tokens (500 novels)
-- gemini-1.5-pro:      2,000,000 tokens (1000 novels)
-- gemini-1.5-flash:    1,000,000 tokens (500 novels)
-- gemini-1.0-pro:         32,000 tokens (16 novels)
+- gemini-3.1-pro-preview:        1,048,576 tokens (524 novels)
+- gemini-3-flash-preview:        1,048,576 tokens (524 novels)
+- gemini-3.1-flash-lite-preview: 1,048,576 tokens (524 novels)
+- gemini-2.5-pro:                1,048,576 tokens (524 novels)
+- gemini-2.5-flash:              1,048,576 tokens (524 novels)
+- gemini-2.5-flash-lite:         1,048,576 tokens (524 novels)
 
 For comparison:
 - GPT-4 Turbo:          128,000 tokens
 - Claude 3.5 Sonnet:    200,000 tokens
+```
+
+---
+
+## Extended Thinking (Gemini 3.x and 2.5)
+
+Gemini 3.x and 2.5 models support **Extended Thinking**, a feature that allows the model to "think" more deeply before responding. This improves reasoning quality for complex tasks like mathematical proofs, code analysis, and multi-step problem solving.
+
+### Thinking Levels
+
+| Level       | Description                        | Use Case                            | Token Budget |
+| ----------- | ---------------------------------- | ----------------------------------- | ------------ |
+| **minimal** | Basic reasoning with minimal usage | Quick decisions, simple queries     | ~500 tokens  |
+| **low**     | Quick reasoning, minimal overhead  | Simple analysis, quick decisions    | ~1K tokens   |
+| **medium**  | Balanced thinking depth            | Code review, moderate complexity    | ~8K tokens   |
+| **high**    | Deep reasoning, maximum thinking   | Complex proofs, architecture design | ~24K tokens  |
+
+### Configuration
+
+```typescript
+import { NeuroLink } from "@juspay/neurolink";
+
+const ai = new NeuroLink();
+
+// Enable extended thinking with thinkingLevel
+const result = await ai.generate({
+  input: { text: "Prove that the square root of 2 is irrational" },
+  provider: "google-ai",
+  model: "gemini-3.1-pro-preview",
+  thinkingConfig: { thinkingLevel: "high" }, // 'minimal' | 'low' | 'medium' | 'high'
+});
+
+console.log(result.content);
+```
+
+### Extended Thinking Examples
+
+```typescript
+// Mathematical reasoning with high thinking
+const mathProof = await ai.generate({
+  input: {
+    text: "Prove the Pythagorean theorem using at least three different methods",
+  },
+  provider: "google-ai",
+  model: "gemini-3.1-pro-preview",
+  thinkingConfig: { thinkingLevel: "high" },
+});
+
+// Code architecture analysis
+const codeReview = await ai.generate({
+  input: {
+    text: `Review this code for potential issues and suggest improvements:
+
+    ${codeSnippet}`,
+  },
+  provider: "google-ai",
+  model: "gemini-3-flash-preview",
+  thinkingLevel: "medium",
+});
+
+// Quick analysis with minimal thinking overhead
+const quickAnalysis = await ai.generate({
+  input: { text: "What's the time complexity of binary search?" },
+  provider: "google-ai",
+  model: "gemini-3-flash-preview",
+  thinkingLevel: "low",
+});
+```
+
+### CLI Usage with Thinking
+
+```bash
+# Use Gemini 3.1 with extended thinking
+npx @juspay/neurolink generate "Solve this logic puzzle..." \
+  --provider google-ai \
+  --model "gemini-3.1-pro-preview" \
+  --thinking-level high
+
+# Fast reasoning with medium thinking
+npx @juspay/neurolink generate "Analyze this code pattern" \
+  --provider google-ai \
+  --model "gemini-3-flash-preview" \
+  --thinking-level medium
+```
+
+### Best Practices for Extended Thinking
+
+1. **Match thinking level to task complexity**: Use `low` for simple queries, `high` for complex reasoning
+2. **Consider latency**: Higher thinking levels increase response time
+3. **Token budget awareness**: Thinking tokens count toward your quota
+4. **Streaming recommended**: Use streaming for high thinking levels to see progress
+
+```typescript
+// Stream thinking responses for better UX
+const thinkingResult = await ai.stream({
+  input: { text: "Design a distributed caching system" },
+  provider: "google-ai",
+  model: "gemini-3.1-pro-preview",
+  thinkingConfig: { thinkingLevel: "high" },
+});
+for await (const chunk of thinkingResult.stream) {
+  if ("content" in chunk) process.stdout.write(chunk.content);
+}
 ```
 
 ---
@@ -373,17 +534,17 @@ const imageAnalysis = await ai.generate({
     images: ["data:image/jpeg;base64,/9j/4AAQSkZJRg..."],
   },
   provider: "google-ai",
-  model: "gemini-1.5-pro",
+  model: "gemini-2.5-flash",
 });
 
-// Video analysis (Gemini 1.5 Pro)
+// Video analysis
 const videoAnalysis = await ai.generate({
   input: {
     text: "Summarize the key events in this video",
     videos: ["data:video/mp4;base64,..."],
   },
   provider: "google-ai",
-  model: "gemini-1.5-pro",
+  model: "gemini-2.5-pro",
 });
 
 // Audio transcription and analysis
@@ -393,7 +554,7 @@ const audioAnalysis = await ai.generate({
     audio: ["data:audio/mp3;base64,..."],
   },
   provider: "google-ai",
-  model: "gemini-1.5-pro",
+  model: "gemini-2.5-flash",
 });
 ```
 
@@ -401,19 +562,20 @@ const audioAnalysis = await ai.generate({
 
 ```typescript
 // Stream long responses for better UX
-for await (const chunk of ai.stream({
+const streamResult = await ai.stream({
   input: { text: "Write a detailed article about AI" },
   provider: "google-ai",
-  model: "gemini-1.5-pro",
-})) {
-  process.stdout.write(chunk.content);
+  model: "gemini-2.5-flash",
+});
+for await (const chunk of streamResult.stream) {
+  if ("content" in chunk) process.stdout.write(chunk.content);
 }
 ```
 
 ### Large Context Handling
 
 ```typescript
-// Leverage 2M token context window (Gemini 1.5 Pro)
+// Leverage 1M token context window (Gemini 2.5 Pro)
 const largeDocument = readFileSync("large-document.txt", "utf-8");
 
 const analysis = await ai.generate({
@@ -421,7 +583,7 @@ const analysis = await ai.generate({
     text: `Analyze this entire document and provide key insights:\n\n${largeDocument}`,
   },
   provider: "google-ai",
-  model: "gemini-1.5-pro", // 2M context window
+  model: "gemini-2.5-pro", // 1M context window
 });
 ```
 
@@ -446,7 +608,7 @@ const tools = [
 const result = await ai.generate({
   input: { text: "What's the weather in London?" },
   provider: "google-ai",
-  model: "gemini-1.5-pro",
+  model: "gemini-2.5-flash",
   tools,
 });
 
@@ -466,7 +628,7 @@ npx @juspay/neurolink generate "Hello Gemini" --provider google-ai
 # Use specific model
 npx @juspay/neurolink gen "Write code" \
   --provider google-ai \
-  --model "gemini-2.0-flash"
+  --model "gemini-2.5-flash"
 
 # Stream response
 npx @juspay/neurolink stream "Tell a story" --provider google-ai
@@ -481,17 +643,17 @@ npx @juspay/neurolink status --provider google-ai
 # With temperature and max tokens
 npx @juspay/neurolink gen "Creative writing prompt" \
   --provider google-ai \
-  --model "gemini-1.5-pro" \
+  --model "gemini-2.5-pro" \
   --temperature 0.9 \
   --max-tokens 2000
 
 # Interactive mode
-npx @juspay/neurolink loop --provider google-ai --model "gemini-2.0-flash"
+npx @juspay/neurolink loop --provider google-ai --model "gemini-2.5-flash"
 
 # Multimodal: Image analysis (requires image file)
 npx @juspay/neurolink gen "Describe this image" \
   --provider google-ai \
-  --model "gemini-1.5-pro" \
+  --model "gemini-2.5-flash" \
   --image ./photo.jpg
 ```
 
@@ -506,7 +668,7 @@ npx @juspay/neurolink gen "Describe this image" \
 GOOGLE_AI_API_KEY=AIza-your-key-here
 
 # Optional
-GOOGLE_AI_MODEL=gemini-2.0-flash  # Default model
+GOOGLE_AI_MODEL=gemini-2.5-flash  # Default model
 GOOGLE_AI_TIMEOUT=60000  # Request timeout (ms)
 GOOGLE_AI_MAX_RETRIES=3  # Retry attempts on rate limits
 ```
@@ -520,7 +682,7 @@ const ai = new NeuroLink({
       name: "google-ai",
       config: {
         apiKey: process.env.GOOGLE_AI_API_KEY,
-        defaultModel: "gemini-2.0-flash",
+        defaultModel: "gemini-2.5-flash",
         timeout: 60000,
         maxRetries: 3,
         retryDelay: 1000,
@@ -693,13 +855,16 @@ async function cachedGenerate(prompt: string) {
 
 ```typescript
 // Use streaming for immediate feedback
-for await (const chunk of ai.stream({
+const result = await ai.stream({
   input: { text: "Your prompt" },
   provider: "google-ai",
-  model: "gemini-2.0-flash", // Fastest model
-})) {
-  // Display partial results immediately
-  console.log(chunk.content);
+  model: "gemini-2.5-flash", // Fastest model
+});
+for await (const chunk of result.stream) {
+  if ("content" in chunk) {
+    // Display partial results immediately
+    process.stdout.write(chunk.content);
+  }
 }
 ```
 
@@ -712,16 +877,21 @@ for await (const chunk of ai.stream({
 ```typescript
 // Use current model names
 const validModels = [
-  "gemini-2.0-flash", // ✅ Current
-  "gemini-1.5-pro", // ✅ Current
-  "gemini-1.5-flash", // ✅ Current
-  "gemini-pro", // ❌ Use gemini-1.0-pro instead
+  "gemini-3.1-pro-preview", // ✅ Latest with thinking
+  "gemini-3-flash-preview", // ✅ Fast with thinking
+  "gemini-3.1-flash-lite-preview", // ✅ Lite preview
+  "gemini-2.5-pro", // ✅ Production flagship
+  "gemini-2.5-flash", // ✅ Default model
+  "gemini-2.5-flash-lite", // ✅ Cost-optimized
+  "gemini-2.0-flash", // ⚠️ Retiring June 1, 2026
+  "gemini-1.5-pro", // ❌ SHUT DOWN (returns 404)
+  "gemini-1.5-flash", // ❌ SHUT DOWN (returns 404)
 ];
 
 const result = await ai.generate({
   input: { text: "test" },
   provider: "google-ai",
-  model: "gemini-2.0-flash", // Use latest
+  model: "gemini-2.5-flash", // Use default
 });
 ```
 
@@ -801,26 +971,33 @@ async function robustGenerate(prompt: string) {
 
 ```typescript
 // ✅ Good: Choose appropriate model for task
-function selectModel(task: string): string {
+function selectModel(task: string, needsThinking: boolean = false): string {
   const taskType = analyzeTask(task);
+
+  // Use Gemini 3.x for tasks requiring deep reasoning
+  if (needsThinking || /prove|reason|analyze deeply|architecture/.test(task)) {
+    return taskType === "realtime"
+      ? "gemini-3-flash-preview" // Fast thinking
+      : "gemini-3.1-pro-preview"; // Deep thinking
+  }
 
   switch (taskType) {
     case "simple":
-      return "gemini-1.5-flash"; // Fast, cost-effective
+      return "gemini-2.5-flash-lite"; // Fast, cost-effective
     case "complex":
-      return "gemini-1.5-pro"; // High capability
+      return "gemini-3.1-pro-preview"; // High capability with thinking
     case "realtime":
-      return "gemini-2.0-flash"; // Lowest latency
+      return "gemini-2.5-flash"; // Lowest latency
     case "multimodal":
-      return "gemini-1.5-pro"; // Best multimodal
+      return "gemini-2.5-pro"; // Best multimodal
     default:
-      return "gemini-2.0-flash"; // Default
+      return "gemini-2.5-flash"; // Default
   }
 }
 
 function analyzeTask(task: string): string {
   if (task.length < 100) return "simple";
-  if (/analyze|complex|detailed/.test(task)) return "complex";
+  if (/analyze|complex|detailed|prove|reason/.test(task)) return "complex";
   if (/image|video|audio/.test(task)) return "multimodal";
   return "realtime";
 }
@@ -874,9 +1051,13 @@ class CachedGoogleAI {
 
 ## Known Limitations
 
-### Structured Output + Function Calling
+### Tools + JSON Schema Cannot Be Used Together
 
-**Google API Limitation:** Google AI Studio (Gemini models) cannot combine function calling with structured output (JSON schema). This is a fundamental Google API constraint documented in the [Gemini API documentation](https://ai.google.dev/gemini-api/docs/).
+:::warning[Critical Limitation]
+Gemini models (including Gemini 3) cannot use function calling (tools) and JSON schema output simultaneously. You must choose one or the other.
+:::
+
+**Google API Limitation:** Google AI Studio (all Gemini models including Gemini 3) cannot combine function calling with structured output (JSON schema). This is a fundamental Google API constraint documented in the [Gemini API documentation](https://ai.google.dev/gemini-api/docs/).
 
 **Error:**
 
@@ -887,13 +1068,31 @@ Function calling with a response mime type: 'application/json' is unsupported
 **Solution:**
 
 ```typescript
-// ✅ Correct approach
+// ❌ This will fail - tools + schema together
+const badResult = await neurolink.generate({
+  input: { text: "Analyze this data" },
+  schema: MyZodSchema,
+  provider: "google-ai",
+  model: "gemini-3.1-pro-preview",
+  tools: myTools, // Cannot use tools with schema!
+});
+
+// ✅ Correct approach - disable tools when using schema
 const result = await neurolink.generate({
   input: { text: "Analyze this data" },
   schema: MyZodSchema,
   output: { format: "json" },
   provider: "google-ai",
+  model: "gemini-3.1-pro-preview",
   disableTools: true, // Required for schemas
+});
+
+// ✅ Alternative - use tools without schema
+const toolResult = await neurolink.generate({
+  input: { text: "What's the weather in London?" },
+  provider: "google-ai",
+  model: "gemini-3-flash-preview",
+  tools: myTools, // Works fine without schema
 });
 ```
 
@@ -901,13 +1100,15 @@ const result = await neurolink.generate({
 
 - This limitation affects ALL frameworks using Gemini (LangChain, Vercel AI SDK, Agno, Instructor)
 - All use the same workaround: disable tools when using schemas
-- Future Gemini versions may support both - check official Google AI Studio documentation for updates
+- This applies to all Gemini versions including Gemini 3 preview models
+- Check official Google AI Studio documentation for future updates
 
 **Alternative Approaches:**
 
 1. Use OpenAI or Anthropic providers (support both simultaneously)
 2. Use Vertex AI with Claude models (via Anthropic integration)
 3. Choose between tools OR schemas for Gemini models
+4. Chain requests: first call with tools, second call with schema
 
 ### Complex Schema Limitations
 
@@ -925,7 +1126,7 @@ Error: 9 FAILED_PRECONDITION: Too many states for serving
 2. Use `disableTools: true` (reduces state count)
 3. Split complex operations into multiple simpler calls
 
-See [Troubleshooting Guide](../../TROUBLESHOOTING.md#google-gemini-too-many-states-for-serving-error) for details.
+See [Troubleshooting Guide](../../troubleshooting.md) for details.
 
 ---
 

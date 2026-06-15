@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isAbortError } from "../utils/errorHandling.js";
 import { logger } from "../utils/logger.js";
 import type {
   DynamicModelConfig as ModelConfig,
@@ -24,9 +25,9 @@ const ModelConfigSchema = z.object({
 const ModelRegistrySchema = z.object({
   version: z.string(),
   lastUpdated: z.string(),
-  models: z.record(z.record(ModelConfigSchema)),
-  aliases: z.record(z.string()).optional(),
-  defaults: z.record(z.string()).optional(),
+  models: z.record(z.string(), z.record(z.string(), ModelConfigSchema)),
+  aliases: z.record(z.string(), z.string()).optional(),
+  defaults: z.record(z.string(), z.string()).optional(),
 });
 
 /**
@@ -167,8 +168,10 @@ export class DynamicModelProvider {
       } catch (error) {
         clearTimeout(timeoutId);
 
-        if (error instanceof Error && error.name === "AbortError") {
-          throw new Error(`Request timeout after ${timeoutMs}ms`);
+        if (isAbortError(error)) {
+          throw new Error(`Request timeout after ${timeoutMs}ms`, {
+            cause: error,
+          });
         }
 
         throw error;
@@ -232,15 +235,18 @@ export class DynamicModelProvider {
     } catch (error) {
       clearTimeout(timeoutId);
 
-      if (error instanceof Error && error.name === "AbortError") {
+      if (isAbortError(error)) {
         throw new Error(
           `Localhost health check timeout - server may not be running`,
+          { cause: error },
         );
       }
 
       // For connection refused, throw a more specific error
       if (error instanceof Error && error.message.includes("ECONNREFUSED")) {
-        throw new Error(`Localhost server not running at ${url}`);
+        throw new Error(`Localhost server not running at ${url}`, {
+          cause: error,
+        });
       }
 
       // For other errors, let the main request handle them

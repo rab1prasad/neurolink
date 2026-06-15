@@ -15,8 +15,15 @@ import { z } from "zod";
 import { CLI_LIMITS } from "../../lib/core/constants.js";
 
 import { logger } from "../../lib/utils/logger.js";
-// Configuration schema for validation
-const ConfigSchema = z.object({
+import { getTopModelChoices } from "../../lib/utils/modelChoices.js";
+import {
+  AIProviderName,
+  type CliNeuroLinkConfig,
+} from "../../lib/types/index.js";
+// Configuration schema for validation. Annotated with
+// z.ZodType<CliNeuroLinkConfig> so drift between the canonical structural
+// type in src/lib/types/cli.ts and this runtime schema fails at compile time.
+const ConfigSchema: z.ZodType<CliNeuroLinkConfig> = z.object({
   defaultProvider: z
     .enum([
       "auto",
@@ -56,7 +63,7 @@ const ConfigSchema = z.object({
       vertex: z
         .object({
           projectId: z.string().optional(),
-          location: z.string().default("us-east5"),
+          location: z.string().default("us-central1"),
           credentials: z.string().optional(),
           serviceAccountKey: z.string().optional(),
           clientEmail: z.string().optional(),
@@ -122,7 +129,15 @@ const ConfigSchema = z.object({
       enableAnalyticsByDefault: z.boolean().default(false),
       enableEvaluationByDefault: z.boolean().default(false),
     })
-    .default({}),
+    .default({
+      outputFormat: "text",
+      temperature: 0.7,
+      enableLogging: false,
+      enableCaching: true,
+      cacheStrategy: "memory",
+      enableAnalyticsByDefault: false,
+      enableEvaluationByDefault: false,
+    }),
   domains: z
     .object({
       healthcare: z
@@ -136,9 +151,20 @@ const ConfigSchema = z.object({
               trackDiagnosticAccuracy: z.boolean().default(true),
               trackTreatmentOutcomes: z.boolean().default(true),
             })
-            .default({}),
+            .default({
+              trackPatientData: false,
+              trackDiagnosticAccuracy: true,
+              trackTreatmentOutcomes: true,
+            }),
         })
-        .default({}),
+        .default({
+          evaluationCriteria: ["accuracy", "safety", "compliance", "clarity"],
+          analyticsConfig: {
+            trackPatientData: false,
+            trackDiagnosticAccuracy: true,
+            trackTreatmentOutcomes: true,
+          },
+        }),
       analytics: z
         .object({
           evaluationCriteria: z
@@ -150,9 +176,25 @@ const ConfigSchema = z.object({
               trackModelPerformance: z.boolean().default(true),
               trackBusinessImpact: z.boolean().default(true),
             })
-            .default({}),
+            .default({
+              trackDataQuality: true,
+              trackModelPerformance: true,
+              trackBusinessImpact: true,
+            }),
         })
-        .default({}),
+        .default({
+          evaluationCriteria: [
+            "accuracy",
+            "relevance",
+            "completeness",
+            "insight",
+          ],
+          analyticsConfig: {
+            trackDataQuality: true,
+            trackModelPerformance: true,
+            trackBusinessImpact: true,
+          },
+        }),
       finance: z
         .object({
           evaluationCriteria: z
@@ -169,9 +211,25 @@ const ConfigSchema = z.object({
               trackRegulatory: z.boolean().default(true),
               trackPortfolioImpact: z.boolean().default(false),
             })
-            .default({}),
+            .default({
+              trackRiskMetrics: true,
+              trackRegulatory: true,
+              trackPortfolioImpact: false,
+            }),
         })
-        .default({}),
+        .default({
+          evaluationCriteria: [
+            "accuracy",
+            "risk-awareness",
+            "compliance",
+            "timeliness",
+          ],
+          analyticsConfig: {
+            trackRiskMetrics: true,
+            trackRegulatory: true,
+            trackPortfolioImpact: false,
+          },
+        }),
       ecommerce: z
         .object({
           evaluationCriteria: z
@@ -188,19 +246,81 @@ const ConfigSchema = z.object({
               trackUserBehavior: z.boolean().default(true),
               trackRevenueImpact: z.boolean().default(true),
             })
-            .default({}),
+            .default({
+              trackConversions: true,
+              trackUserBehavior: true,
+              trackRevenueImpact: true,
+            }),
         })
-        .default({}),
+        .default({
+          evaluationCriteria: [
+            "conversion-potential",
+            "user-experience",
+            "revenue-impact",
+            "practicality",
+          ],
+          analyticsConfig: {
+            trackConversions: true,
+            trackUserBehavior: true,
+            trackRevenueImpact: true,
+          },
+        }),
     })
-    .default({}),
+    .default({
+      healthcare: {
+        evaluationCriteria: ["accuracy", "safety", "compliance", "clarity"],
+        analyticsConfig: {
+          trackPatientData: false,
+          trackDiagnosticAccuracy: true,
+          trackTreatmentOutcomes: true,
+        },
+      },
+      analytics: {
+        evaluationCriteria: [
+          "accuracy",
+          "relevance",
+          "completeness",
+          "insight",
+        ],
+        analyticsConfig: {
+          trackDataQuality: true,
+          trackModelPerformance: true,
+          trackBusinessImpact: true,
+        },
+      },
+      finance: {
+        evaluationCriteria: [
+          "accuracy",
+          "risk-awareness",
+          "compliance",
+          "timeliness",
+        ],
+        analyticsConfig: {
+          trackRiskMetrics: true,
+          trackRegulatory: true,
+          trackPortfolioImpact: false,
+        },
+      },
+      ecommerce: {
+        evaluationCriteria: [
+          "conversion-potential",
+          "user-experience",
+          "revenue-impact",
+          "practicality",
+        ],
+        analyticsConfig: {
+          trackConversions: true,
+          trackUserBehavior: true,
+          trackRevenueImpact: true,
+        },
+      },
+    }),
 });
-
-export type NeuroLinkConfig = z.infer<typeof ConfigSchema>;
 
 export class ConfigManager {
   private configDir: string;
   private configFile: string;
-  private config: NeuroLinkConfig;
+  private config: CliNeuroLinkConfig;
 
   constructor() {
     this.configDir = path.join(os.homedir(), ".neurolink");
@@ -211,7 +331,7 @@ export class ConfigManager {
   /**
    * Load configuration from file or create default
    */
-  private loadConfig(): NeuroLinkConfig {
+  private loadConfig(): CliNeuroLinkConfig {
     try {
       if (fs.existsSync(this.configFile)) {
         const configData = JSON.parse(fs.readFileSync(this.configFile, "utf8"));
@@ -268,7 +388,7 @@ export class ConfigManager {
       // Basic preferences
       const preferences = await inquirer.prompt([
         {
-          type: "list",
+          type: "select",
           name: "defaultProvider",
           message: "Select your default AI provider:",
           choices: [
@@ -294,7 +414,7 @@ export class ConfigManager {
           default: this.config.defaultProvider,
         },
         {
-          type: "list",
+          type: "select",
           name: "outputFormat",
           message: "Preferred output format:",
           choices: ["text", "json", "yaml"],
@@ -308,7 +428,7 @@ export class ConfigManager {
           validate: (value: number) => value >= 0 && value <= 2,
         },
         {
-          type: "list",
+          type: "select",
           name: "defaultEvaluationDomain",
           message: "Default evaluation domain (optional):",
           choices: [
@@ -446,6 +566,9 @@ export class ConfigManager {
    * OpenAI provider setup
    */
   private async setupOpenAI(): Promise<void> {
+    const modelChoices = getTopModelChoices(AIProviderName.OPENAI, 5).filter(
+      (c) => c.value !== "custom",
+    );
     const answers = await inquirer.prompt([
       {
         type: "password",
@@ -455,11 +578,10 @@ export class ConfigManager {
           value.startsWith("sk-") || 'API key should start with "sk-"',
       },
       {
-        type: "list",
+        type: "select",
         name: "model",
         message: "Default model:",
-        choices: ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
-        default: "gpt-4",
+        choices: modelChoices,
       },
       {
         type: "input",
@@ -528,7 +650,7 @@ export class ConfigManager {
   private async setupVertex(): Promise<void> {
     const { authMethod } = await inquirer.prompt([
       {
-        type: "list",
+        type: "select",
         name: "authMethod",
         message: "Authentication method:",
         choices: [
@@ -539,6 +661,10 @@ export class ConfigManager {
       },
     ]);
 
+    const vertexModelChoices = getTopModelChoices(
+      AIProviderName.VERTEX,
+      5,
+    ).filter((c) => c.value !== "custom");
     const commonAnswers = await inquirer.prompt([
       {
         type: "input",
@@ -551,14 +677,13 @@ export class ConfigManager {
         type: "input",
         name: "location",
         message: "Vertex AI Location:",
-        default: "us-east5",
+        default: "us-central1",
       },
       {
-        type: "list",
+        type: "select",
         name: "model",
         message: "Default model:",
-        choices: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-pro"],
-        default: "gemini-2.5-pro",
+        choices: vertexModelChoices,
       },
     ]);
 
@@ -634,6 +759,10 @@ export class ConfigManager {
    * Anthropic provider setup
    */
   private async setupAnthropic(): Promise<void> {
+    const anthropicModelChoices = getTopModelChoices(
+      AIProviderName.ANTHROPIC,
+      5,
+    ).filter((c) => c.value !== "custom");
     const answers = await inquirer.prompt([
       {
         type: "password",
@@ -642,25 +771,25 @@ export class ConfigManager {
         validate: (value: string) => value.length > 0 || "API key is required",
       },
       {
-        type: "list",
+        type: "select",
         name: "model",
         message: "Default model:",
-        choices: [
-          "claude-3-5-sonnet-20241022",
-          "claude-3-5-haiku-20241022",
-          "claude-3-opus-20240229",
-        ],
-        default: "claude-3-5-sonnet-20241022",
+        choices: anthropicModelChoices,
       },
     ]);
 
-    this.config.providers.anthropic = answers;
+    this.config.providers.anthropic =
+      answers as typeof this.config.providers.anthropic;
   }
 
   /**
    * Azure OpenAI provider setup
    */
   private async setupAzure(): Promise<void> {
+    const azureModelChoices = getTopModelChoices(
+      AIProviderName.AZURE,
+      5,
+    ).filter((c) => c.value !== "custom");
     const answers = await inquirer.prompt([
       {
         type: "password",
@@ -680,21 +809,24 @@ export class ConfigManager {
         message: "Deployment ID:",
       },
       {
-        type: "list",
+        type: "select",
         name: "model",
         message: "Model:",
-        choices: ["gpt-4", "gpt-4-turbo", "gpt-35-turbo"],
-        default: "gpt-4",
+        choices: azureModelChoices,
       },
     ]);
 
-    this.config.providers.azure = answers;
+    this.config.providers.azure = answers as typeof this.config.providers.azure;
   }
 
   /**
    * Google AI Studio provider setup
    */
   private async setupGoogleAI(): Promise<void> {
+    const googleAIModelChoices = getTopModelChoices(
+      AIProviderName.GOOGLE_AI,
+      5,
+    ).filter((c) => c.value !== "custom");
     const answers = await inquirer.prompt([
       {
         type: "password",
@@ -703,15 +835,15 @@ export class ConfigManager {
         validate: (value: string) => value.length > 0 || "API key is required",
       },
       {
-        type: "list",
+        type: "select",
         name: "model",
         message: "Default model:",
-        choices: ["gemini-2.5-pro", "gemini-2.5-flash"],
-        default: "gemini-2.5-pro",
+        choices: googleAIModelChoices,
       },
     ]);
 
-    this.config.providers["google-ai"] = answers;
+    this.config.providers["google-ai"] =
+      answers as (typeof this.config.providers)["google-ai"];
   }
 
   /**
@@ -771,6 +903,10 @@ export class ConfigManager {
    * Mistral AI provider setup
    */
   private async setupMistral(): Promise<void> {
+    const mistralModelChoices = getTopModelChoices(
+      AIProviderName.MISTRAL,
+      5,
+    ).filter((c) => c.value !== "custom");
     const answers = await inquirer.prompt([
       {
         type: "password",
@@ -779,33 +915,28 @@ export class ConfigManager {
         validate: (value: string) => value.length > 0 || "API key is required",
       },
       {
-        type: "list",
+        type: "select",
         name: "model",
         message: "Default model:",
-        choices: [
-          "mistral-small",
-          "mistral-medium",
-          "mistral-large",
-          "mistral-tiny",
-        ],
-        default: "mistral-small",
+        choices: mistralModelChoices,
       },
     ]);
 
-    this.config.providers.mistral = answers;
+    this.config.providers.mistral =
+      answers as typeof this.config.providers.mistral;
   }
 
   /**
    * Get current configuration
    */
-  getConfig(): NeuroLinkConfig {
+  getConfig(): CliNeuroLinkConfig {
     return this.config;
   }
 
   /**
    * Update configuration
    */
-  updateConfig(updates: Partial<NeuroLinkConfig>): void {
+  updateConfig(updates: Partial<CliNeuroLinkConfig>): void {
     this.config = { ...this.config, ...updates };
     this.saveConfig();
   }
@@ -888,7 +1019,9 @@ export class ConfigManager {
     } catch (error) {
       if (error instanceof z.ZodError) {
         errors.push(
-          ...error.errors.map((e) => `${e.path.join(".")}: ${e.message}`),
+          ...error.issues.map(
+            (e) => `${String(e.path.join("."))}: ${e.message}`,
+          ),
         );
       }
     }

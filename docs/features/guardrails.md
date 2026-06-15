@@ -24,8 +24,9 @@ keywords: guardrails, content filtering, PII detection, safety, middleware, bad 
 
 ## Quick Start
 
-!!! success "Zero Configuration"
+:::tip[Zero Configuration]
 Guardrails work out of the box with the `security` preset. No custom configuration required for basic content filtering.
+:::
 
 ### SDK Example with Security Preset
 
@@ -174,8 +175,9 @@ Simple regex-based replacement:
 
 ### Model-Based Filtering
 
-!!! danger "PII Detection Accuracy"
+:::danger[PII Detection Accuracy]
 While guardrails filter common PII patterns, always review critical outputs manually. False negatives can occur with obfuscated data or uncommon PII formats. For high-stakes compliance, combine with dedicated PII detection services.
+:::
 
 AI-powered safety check:
 
@@ -262,7 +264,7 @@ const neurolink = new NeuroLink({
 - `preset: "all"` → Enables guardrails + all other middleware
 - `middlewareConfig.guardrails` → Custom guardrails configuration
 
-See [GUARDRAILS-AI-INTEGRATION.md](../GUARDRAILS-AI-INTEGRATION.md) for complete integration guide.
+See [guardrails-ai-integration.md](../guardrails-ai-integration.md) for complete integration guide.
 
 ## Troubleshooting
 
@@ -402,7 +404,7 @@ config: {
 ## Related Features
 
 - [HITL Workflows](./hitl.md) - User approval for risky actions
-- [Middleware Architecture](../MIDDLEWARE.md) - Custom middleware development
+- [Middleware Architecture](../middleware.md) - Custom middleware development
 - [Analytics Integration](../advanced/analytics.md) - Track filtered content metrics
 
 ## Migration Notes
@@ -414,4 +416,4 @@ If upgrading from versions before v7.42.0:
 3. No breaking changes - existing configs still work
 4. Recommended: Switch to `preset: "security"` for simplified setup
 
-For complete technical documentation and advanced integration patterns, see [GUARDRAILS-AI-INTEGRATION.md](../GUARDRAILS-AI-INTEGRATION.md).
+For complete technical documentation and advanced integration patterns, see [guardrails-ai-integration.md](../guardrails-ai-integration.md).

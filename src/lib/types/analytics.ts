@@ -12,12 +12,16 @@ export type TokenUsage = {
   input: number;
   output: number;
   total: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
+  reasoning?: number;
+  cacheSavingsPercent?: number;
 };
 
 /**
  * Error info type for analytics
  */
-export type ErrorInfo = {
+export type AnalyticsErrorInfo = {
   message: string;
   code?: string | number;
   stack?: string;

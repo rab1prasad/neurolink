@@ -11,17 +11,9 @@ import inquirer from "inquirer";
 
 import { logger } from "../../lib/utils/logger.js";
 import { OllamaUtils } from "../utils/ollamaUtils.js";
-
-// Allowed commands for security
-type AllowedCommand =
-  | "ollama"
-  | "curl"
-  | "systemctl"
-  | "pkill"
-  | "killall"
-  | "open"
-  | "taskkill"
-  | "start";
+import { getTopModelChoices } from "../../lib/utils/modelChoices.js";
+import { AIProviderName } from "../../lib/types/index.js";
+import type { AllowedCommand } from "../../lib/types/index.js";
 
 /**
  * Factory for creating Ollama CLI commands using the Factory Pattern
@@ -408,26 +400,15 @@ export class OllamaCommandFactory {
       if (downloadModel) {
         const { selectedModel } = await inquirer.prompt([
           {
-            type: "list",
+            type: "select",
             name: "selectedModel",
             message: "Select a model to download:",
-            choices: [
-              {
-                name: "llama2 (7B) - Recommended for general use",
-                value: "llama2",
-              },
-              {
-                name: "codellama (7B) - Best for code generation",
-                value: "codellama",
-              },
-              { name: "mistral (7B) - Fast and efficient", value: "mistral" },
-              {
-                name: "tinyllama (1B) - Lightweight, fast",
-                value: "tinyllama",
-              },
-              { name: "phi (2.7B) - Microsoft's compact model", value: "phi" },
-              { name: "Other (enter manually)", value: "other" },
-            ],
+            choices: getTopModelChoices(AIProviderName.OLLAMA, 5).map(
+              (choice) =>
+                choice.value === "custom"
+                  ? { name: "Other (enter manually)", value: "other" }
+                  : choice,
+            ),
           },
         ]);
 

@@ -1,3 +1,7 @@
+---
+description: Explore NeuroLink's enterprise-grade capabilities including middleware, streaming, memory, and factory patterns.
+---
+
 # Advanced Features
 
 Explore NeuroLink's enterprise-grade capabilities that set it apart from basic AI integration libraries.
@@ -14,39 +18,21 @@ NeuroLink goes beyond simple API wrappers to provide a comprehensive AI developm
 
 ## 🚀 Feature Overview
 
-<div class="grid cards" markdown>
+- **[MCP Integration](mcp-integration.md)** — Model Context Protocol support with 6 built-in tools and 58+ discoverable external servers.
+- **[Analytics & Evaluation](analytics.md)** — Built-in usage tracking, cost monitoring, performance metrics, and AI response quality evaluation.
+- **[Factory Patterns](factory-patterns.md)** — Unified provider architecture using the Factory Pattern for consistent interfaces and easy extensibility.
+- **[Dynamic Models](dynamic-models.md)** — Self-updating model configurations, automatic cost optimization, and smart model resolution.
+- **[Streaming](streaming.md)** — Real-time streaming architecture with analytics support and multi-modal readiness.
+- **[Middleware Architecture](middleware-architecture.md)** — Comprehensive middleware system for request/response processing, logging, and custom transformations.
+- **[Built-in Middleware](builtin-middleware.md)** — Pre-built middleware for analytics, guardrails, and auto-evaluation.
 
-- :material-connection: **[MCP Integration](mcp-integration.md)**
+## 🛡️ Middleware System
 
-  ***
+NeuroLink includes a powerful middleware architecture for extending functionality:
 
-  Model Context Protocol support with 6 built-in tools and 58+ discoverable external servers.
-
-- :material-chart-line: **[Analytics & Evaluation](analytics.md)**
-
-  ***
-
-  Built-in usage tracking, cost monitoring, performance metrics, and AI response quality evaluation.
-
-- :material-factory: **[Factory Patterns](factory-patterns.md)**
-
-  ***
-
-  Unified provider architecture using the Factory Pattern for consistent interfaces and easy extensibility.
-
-- :material-refresh: **[Dynamic Models](dynamic-models.md)**
-
-  ***
-
-  Self-updating model configurations, automatic cost optimization, and smart model resolution.
-
-- :material-wave: **[Streaming](streaming.md)**
-
-  ***
-
-  Real-time streaming architecture with analytics support and multi-modal readiness.
-
-</div>
+- **[Middleware Architecture](middleware-architecture.md)** - Complete middleware lifecycle and factory patterns
+- **[Built-in Middleware](builtin-middleware.md)** - Analytics, Guardrails, Auto-Evaluation middleware reference
+- **[Custom Middleware Guide](../custom-middleware-guide.md)** - Build your own middleware with examples
 
 ## 🏭 Architecture Highlights
 
@@ -201,20 +187,8 @@ console.log(result.analytics);
 
 ## 🔮 Future Roadmap
 
-### Coming Soon
-
 - **Real-time WebSocket Infrastructure** (in development)
-- **Enhanced Telemetry** with OpenTelemetry support
-- **Enhanced Chat Services** with session management
-- **External MCP server activation** (discovery complete)
-- **Multi-modal inputs** (image, audio, video)
-
-### In Development
-
 - **Advanced caching** strategies
-- **Load balancing** across providers
-- **Custom evaluation metrics**
-- **Workflow orchestration** tools
 
 ## 🔗 Deep Dive Resources
 

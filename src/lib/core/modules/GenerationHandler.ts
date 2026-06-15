@@ -13,20 +13,64 @@
  * @module core/modules/GenerationHandler
  */
 
-import type { LanguageModelV1, CoreMessage, Tool } from "ai";
-import { generateText, Output, NoObjectGeneratedError } from "ai";
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { getModelId } from "../../providers/providerTypeUtils.js";
+import { tracers } from "../../telemetry/tracers.js";
 import type {
-  TextGenerationOptions,
-  EnhancedGenerateResult,
+  UnknownRecord,
+  ToolCallObject,
   AIProviderName,
-  StandardRecord,
-  ExtendedTool,
   AISDKGenerateResult,
+  EnhancedGenerateResult,
+  ExtendedTool,
+  NeuroLinkEvents,
+  StandardRecord,
+  TextGenerationOptions,
+  TypedEventEmitter,
 } from "../../types/index.js";
-import type { ToolCallObject, ToolResult } from "../../types/tools.js";
-import type { UnknownRecord } from "../../types/common.js";
 import { logger } from "../../utils/logger.js";
+import { emitToolEndFromStepFinish } from "../../utils/toolEndEmitter.js";
+import { calculateCost } from "../../utils/pricing.js";
+import { withProviderRetry } from "../../utils/providerRetry.js";
+import {
+  calculateCacheSavingsPercent,
+  extractCacheCreationTokens,
+  extractCacheReadTokens,
+  extractTokenUsage,
+} from "../../utils/tokenUtils.js";
 import { DEFAULT_MAX_STEPS } from "../constants.js";
+import {
+  isToolsSchemaConflictError,
+  isToolsSchemaExclusionInForce,
+} from "./structuredOutputPolicy.js";
+import { coerceJsonToSchema } from "../../utils/json/coerce.js";
+import type {
+  LanguageModel,
+  ModelMessage,
+  PrepareStepFunction,
+  Tool,
+} from "../../types/index.js";
+import { NoObjectGeneratedError } from "../../utils/generationErrors.js";
+import { Output, stepCountIs } from "../../utils/tool.js";
+import { generateText } from "../../utils/generation.js";
+
+const genTracer = tracers.generation;
+
+/**
+ * Safely preview-serialize a value for debug logging.
+ * Handles undefined, circular references, and non-serializable values.
+ */
+function safePreview(v: unknown): string {
+  if (v === undefined) {
+    return "";
+  }
+  try {
+    const text = typeof v === "string" ? v : JSON.stringify(v);
+    return (text ?? "").substring(0, 200);
+  } catch {
+    return "[unserializable]";
+  }
+}
 
 /**
  * GenerationHandler class - Handles text generation operations for AI providers
@@ -52,6 +96,9 @@ export class GenerationHandler {
       options: TextGenerationOptions,
       timestamp: Date,
     ) => Promise<void>,
+    private readonly getEmitterFn?: () =>
+      | TypedEventEmitter<NeuroLinkEvents>
+      | undefined,
   ) {}
 
   /**
@@ -59,34 +106,146 @@ export class GenerationHandler {
    * @private
    */
   private async callGenerateText(
-    model: LanguageModelV1,
-    messages: CoreMessage[],
+    model: LanguageModel,
+    messages: ModelMessage[],
     tools: Record<string, Tool>,
     options: TextGenerationOptions,
     shouldUseTools: boolean,
     includeStructuredOutput: boolean,
   ): Promise<Awaited<ReturnType<typeof generateText>>> {
-    const useStructuredOutput =
+    // Check if this is a Google provider (for provider-specific options)
+    const isGoogleProvider =
+      this.providerName === "google-ai" || this.providerName === "vertex";
+
+    // Check if this is an Anthropic provider (includes Vertex+Claude)
+    const isAnthropicProvider =
+      this.providerName === "anthropic" ||
+      this.providerName === "bedrock" ||
+      (this.providerName === "vertex" && this.modelName?.startsWith("claude-"));
+
+    // Gemini 2.5 and earlier cannot use tools + structured JSON output simultaneously.
+    // When both are requested on a Google provider, disable structured output (tools take priority).
+    const wantsStructuredOutput =
       includeStructuredOutput &&
-      !!options.schema &&
-      (options.output?.format === "json" ||
+      (!!options.schema ||
+        options.output?.format === "json" ||
         options.output?.format === "structured");
+    // The tools↔schema conflict is a Gemini-only API limitation. Vertex+Claude
+    // supports both simultaneously, so only exclude for actual Gemini models.
+    const useStructuredOutput =
+      wantsStructuredOutput &&
+      !isToolsSchemaExclusionInForce(
+        this.providerName,
+        this.modelName,
+        shouldUseTools,
+        Object.keys(tools).length,
+      );
+
+    // Annotate the last tool with cache_control so the full tool-definition
+    // block becomes a cache breakpoint for Anthropic-family providers.
+    // Non-Anthropic providers harmlessly ignore unknown providerOptions.
+    // Note: The AI SDK Tool type doesn't yet include providerOptions, so we
+    // use a type assertion. The Anthropic adapter reads this at runtime.
+    const toolsWithCache: Record<
+      string,
+      Tool & { providerOptions?: Record<string, unknown> }
+    > = { ...tools };
+    if (
+      isAnthropicProvider &&
+      shouldUseTools &&
+      Object.keys(toolsWithCache).length > 0
+    ) {
+      const toolNames = Object.keys(toolsWithCache);
+      const lastToolName = toolNames[toolNames.length - 1];
+      if (lastToolName && toolsWithCache[lastToolName]) {
+        const lastTool = toolsWithCache[lastToolName] as Tool & {
+          providerOptions?: Record<string, unknown>;
+        };
+        toolsWithCache[lastToolName] = {
+          ...lastTool,
+          providerOptions: {
+            ...(lastTool.providerOptions ?? {}),
+            anthropic: { cacheControl: { type: "ephemeral" } },
+          },
+        };
+      }
+    }
+
+    const prepareStep = options.prepareStep;
 
     return await generateText({
       model,
       messages,
-      ...(shouldUseTools && Object.keys(tools).length > 0 && { tools }),
-      maxSteps: options.maxSteps || DEFAULT_MAX_STEPS,
-      ...(shouldUseTools && { toolChoice: "auto" }),
+      ...(shouldUseTools &&
+        Object.keys(toolsWithCache).length > 0 && { tools: toolsWithCache }),
+      stopWhen: stepCountIs(options.maxSteps ?? DEFAULT_MAX_STEPS),
+      ...(shouldUseTools &&
+        options.toolChoice && { toolChoice: options.toolChoice }),
+      ...(prepareStep && {
+        experimental_prepareStep: ((stepOptions) =>
+          prepareStep({
+            ...stepOptions,
+            maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
+          })) satisfies PrepareStepFunction,
+      }),
       temperature: options.temperature,
-      maxTokens: options.maxTokens,
+      maxOutputTokens: options.maxTokens,
+      maxRetries: 0, // NL11: Disable AI SDK's invisible internal retries; we handle retries with OTel instrumentation
+      abortSignal: options.abortSignal,
       ...(useStructuredOutput &&
         options.schema && {
           experimental_output: Output.object({ schema: options.schema }),
         }),
+      // Add thinking configuration for extended reasoning
+      // Gemini 3 models use providerOptions.google.thinkingConfig with thinkingLevel
+      // Gemini 2.5 models use thinkingBudget
+      // Anthropic models use experimental_thinking with budgetTokens
+      ...(options.thinkingConfig?.enabled && {
+        // For Anthropic: experimental_thinking with budgetTokens
+        ...(isAnthropicProvider &&
+          options.thinkingConfig.budgetTokens &&
+          !options.thinkingConfig.thinkingLevel && {
+            experimental_thinking: {
+              type: "enabled" as const,
+              budgetTokens: options.thinkingConfig.budgetTokens,
+            },
+          }),
+        // For Google Gemini 3: providerOptions with thinkingLevel
+        // For Gemini 2.5: providerOptions with thinkingBudget
+        ...(isGoogleProvider && {
+          providerOptions: {
+            google: {
+              thinkingConfig: {
+                ...(options.thinkingConfig.thinkingLevel && {
+                  thinkingLevel: options.thinkingConfig.thinkingLevel,
+                }),
+                ...(options.thinkingConfig.budgetTokens &&
+                  !options.thinkingConfig.thinkingLevel && {
+                    thinkingBudget: options.thinkingConfig.budgetTokens,
+                  }),
+                includeThoughts: true,
+              },
+            },
+          },
+        }),
+      }),
       experimental_telemetry: this.getTelemetryConfigFn(options, "generate"),
       onStepFinish: ({ toolCalls, toolResults }) => {
         logger.info("Tool execution completed", { toolResults, toolCalls });
+
+        // Emit tool:end events for Pipeline B (metrics aggregator).
+        // This surfaces AI-SDK-driven tool completions as telemetry events
+        // so that tool spans are created even when the SDK runs tools
+        // internally (gaps G5 / S2).
+        emitToolEndFromStepFinish(
+          this.getEmitterFn?.(),
+          toolResults as Array<{
+            toolName: string;
+            output?: unknown;
+            result?: unknown;
+            error?: string;
+          }>,
+        );
 
         // Handle tool execution storage
         this.handleToolStorageFn(
@@ -108,55 +267,319 @@ export class GenerationHandler {
    * Execute the generation with AI SDK
    */
   async executeGeneration(
-    model: LanguageModelV1,
-    messages: CoreMessage[],
+    model: LanguageModel,
+    messages: ModelMessage[],
     tools: Record<string, Tool>,
     options: TextGenerationOptions,
   ): Promise<Awaited<ReturnType<typeof generateText>>> {
-    const shouldUseTools = !options.disableTools && this.supportsToolsFn();
+    return genTracer.startActiveSpan(
+      "neurolink.executeGeneration",
+      { kind: SpanKind.INTERNAL },
+      async (span) => {
+        const shouldUseTools = !options.disableTools && this.supportsToolsFn();
+        const toolCount = Object.keys(tools || {}).length;
 
-    const useStructuredOutput =
-      !!options.schema &&
-      (options.output?.format === "json" ||
-        options.output?.format === "structured");
+        const useStructuredOutput =
+          !!options.schema ||
+          options.output?.format === "json" ||
+          options.output?.format === "structured";
 
-    try {
-      return await this.callGenerateText(
-        model,
-        messages,
-        tools,
-        options,
-        shouldUseTools,
-        true, // includeStructuredOutput
-      );
-    } catch (error) {
-      // If NoObjectGeneratedError is thrown when using schema + tools together,
-      // fall back to generating without experimental_output and extract JSON manually
-      if (error instanceof NoObjectGeneratedError && useStructuredOutput) {
-        logger.debug(
-          "[GenerationHandler] NoObjectGeneratedError caught - falling back to manual JSON extraction",
-          {
-            provider: this.providerName,
-            model: this.modelName,
-            error: error.message,
-          },
+        span.setAttribute("gen_ai.system", this.providerName || "unknown");
+        span.setAttribute("neurolink.structured_output", useStructuredOutput);
+        span.setAttribute("neurolink.tool_count", toolCount);
+        span.setAttribute("neurolink.message_count", messages.length);
+        span.setAttribute(
+          "gen_ai.request.model",
+          getModelId(model, this.modelName || "unknown"),
         );
 
-        // Retry without experimental_output - the formatEnhancedResult method
-        // will extract JSON from the text response
-        return await this.callGenerateText(
-          model,
-          messages,
-          tools,
-          options,
-          shouldUseTools,
-          false, // includeStructuredOutput - intentionally omitted
-        );
-      }
+        const requestId =
+          options.requestId ||
+          ((options.context as Record<string, unknown>)?.requestId as string) ||
+          "unknown";
 
-      // Re-throw other errors
-      throw error;
+        logger.info("[GenerationHandler] Calling generateText", {
+          requestId,
+          model: getModelId(model),
+          messageCount: messages.length,
+          toolCount,
+          maxSteps: options.maxSteps,
+          temperature: options.temperature,
+        });
+
+        if (logger.shouldLog("debug")) {
+          try {
+            logger.debug("[Observability] Full generateText parameters", {
+              requestId,
+              model: getModelId(model),
+              messageCount: messages.length,
+              messages: messages.map((msg, i) => ({
+                index: i,
+                role: msg.role,
+                contentLength:
+                  typeof msg.content === "string"
+                    ? msg.content.length
+                    : safePreview(msg.content).length,
+                contentPreview:
+                  typeof msg.content === "string"
+                    ? msg.content.substring(0, 200)
+                    : "[multimodal]",
+              })),
+              toolNames: Object.keys(tools || {}),
+              toolCount,
+              maxSteps: options.maxSteps,
+              temperature: options.temperature,
+              maxTokens: options.maxTokens,
+            });
+          } catch {
+            // Ignore serialization errors in debug logging
+          }
+        }
+
+        const genStartTime = Date.now();
+
+        try {
+          const result = await withProviderRetry(
+            () =>
+              this.callGenerateText(
+                model,
+                messages,
+                tools,
+                options,
+                shouldUseTools,
+                true, // includeStructuredOutput
+              ),
+            span,
+            "generateText",
+          );
+
+          logger.info("[GenerationHandler] generateText returned", {
+            requestId,
+            durationMs: Date.now() - genStartTime,
+            finishReason: result.finishReason,
+            steps: result.steps?.length || 1,
+            toolCallsTotal: result.toolCalls?.length || 0,
+            responseChars: result.text?.length || 0,
+          });
+
+          if (logger.shouldLog("debug")) {
+            logger.debug("[Observability] LLM response metadata", {
+              requestId,
+              responseLength: result.text?.length || 0,
+              hasToolCalls: !!(result.toolCalls && result.toolCalls.length > 0),
+              toolCallCount: result.toolCalls?.length || 0,
+              toolNames: result.toolCalls?.map(
+                (tc: { toolName: string }) => tc.toolName,
+              ),
+              finishReason: result.finishReason,
+              stepCount: result.steps?.length || 0,
+              steps: result.steps?.map(
+                (
+                  step: {
+                    stepType?: string;
+                    text?: string;
+                    toolCalls?: Array<{ toolName: string }>;
+                    toolResults?: Array<{ toolName: string }>;
+                    finishReason?: string;
+                  },
+                  i: number,
+                ) => ({
+                  stepIndex: i,
+                  stepType: step.stepType,
+                  textLength: step.text?.length || 0,
+                  toolCallCount: step.toolCalls?.length || 0,
+                  toolNames: step.toolCalls?.map(
+                    (tc: { toolName: string }) => tc.toolName,
+                  ),
+                  toolResultCount: step.toolResults?.length || 0,
+                  finishReason: step.finishReason,
+                }),
+              ),
+              usage: result.usage,
+            });
+          }
+
+          // Set token usage and completion attributes on span
+          if (result.usage) {
+            span.setAttribute(
+              "gen_ai.usage.input_tokens",
+              result.usage.inputTokens || 0,
+            );
+            span.setAttribute(
+              "gen_ai.usage.output_tokens",
+              result.usage.outputTokens || 0,
+            );
+            // Cost on span so users can query "what did this trace cost?"
+            const cost = calculateCost(this.providerName, this.modelName, {
+              input: result.usage.inputTokens || 0,
+              output: result.usage.outputTokens || 0,
+              total:
+                (result.usage.inputTokens || 0) +
+                (result.usage.outputTokens || 0),
+            });
+            span.setAttribute("neurolink.cost", cost ?? 0);
+          }
+          if (result.finishReason) {
+            span.setAttribute(
+              "gen_ai.response.finish_reason",
+              result.finishReason,
+            );
+          }
+
+          span.setStatus({ code: SpanStatusCode.OK });
+          return result;
+        } catch (error) {
+          // Fall back to text-mode (no experimental_output) when structured
+          // output + tools failed, in two cases:
+          //   1. NoObjectGeneratedError — the SDK couldn't coerce the object.
+          //   2. The provider rejected json-mode-with-tools outright (e.g. Groq:
+          //      "json mode cannot be combined with tool/function calling").
+          // In both cases we retry without structured output and let
+          // formatEnhancedResult coerce the text response into valid JSON.
+          const isStructuredOutputConflict =
+            useStructuredOutput &&
+            (error instanceof NoObjectGeneratedError ||
+              isToolsSchemaConflictError(error));
+          if (isStructuredOutputConflict) {
+            span.setAttribute("neurolink.has_fallback", true);
+
+            // NLK-GAP-007: Record initial failure event before fallback retry
+            span.addEvent("retry.initial_failure", {
+              "error.message":
+                error instanceof Error ? error.message : String(error),
+              "retry.attempt": 1,
+              "retry.reason":
+                error instanceof NoObjectGeneratedError
+                  ? "NoObjectGeneratedError_structured_output_fallback"
+                  : "tools_schema_conflict_structured_output_fallback",
+            });
+
+            logger.debug(
+              "[GenerationHandler] structured-output conflict caught - falling back to manual JSON extraction",
+              {
+                provider: this.providerName,
+                model: this.modelName,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+
+            // Retry without experimental_output - the formatEnhancedResult method
+            // will extract JSON from the text response
+            const result = await withProviderRetry(
+              () =>
+                this.callGenerateText(
+                  model,
+                  messages,
+                  tools,
+                  options,
+                  shouldUseTools,
+                  false, // includeStructuredOutput - intentionally omitted
+                ),
+              span,
+              "generateText(fallback)",
+            );
+
+            // NLK-GAP-007: Record recovery event after successful fallback
+            span.addEvent("retry.recovered", {
+              "retry.attempts": 2,
+              "retry.strategy": "structured_output_disabled",
+            });
+            span.setAttribute("retry.count", 1);
+
+            logger.info(
+              "[GenerationHandler] generateText returned (fallback)",
+              {
+                requestId,
+                durationMs: Date.now() - genStartTime,
+                finishReason: result.finishReason,
+                steps: result.steps?.length || 1,
+                toolCallsTotal: result.toolCalls?.length || 0,
+                responseChars: result.text?.length || 0,
+              },
+            );
+
+            if (result.usage) {
+              span.setAttribute(
+                "gen_ai.usage.input_tokens",
+                result.usage.inputTokens || 0,
+              );
+              span.setAttribute(
+                "gen_ai.usage.output_tokens",
+                result.usage.outputTokens || 0,
+              );
+              const fallbackCost = calculateCost(
+                this.providerName,
+                this.modelName,
+                {
+                  input: result.usage.inputTokens || 0,
+                  output: result.usage.outputTokens || 0,
+                  total:
+                    (result.usage.inputTokens || 0) +
+                    (result.usage.outputTokens || 0),
+                },
+              );
+              span.setAttribute("neurolink.cost", fallbackCost ?? 0);
+            }
+            if (result.finishReason) {
+              span.setAttribute(
+                "gen_ai.response.finish_reason",
+                result.finishReason,
+              );
+            }
+
+            span.setStatus({ code: SpanStatusCode.OK });
+            return result;
+          }
+
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          // Re-throw other errors
+          throw error;
+        } finally {
+          span.end();
+        }
+      },
+    );
+  }
+
+  /**
+   * Extract cache metrics from provider metadata (e.g. Anthropic's providerMetadata.anthropic)
+   * The AI SDK's LanguageModelUsage only has inputTokens/outputTokens.
+   * Cache metrics are surfaced via providerMetadata by provider-specific SDK adapters.
+   */
+  private extractCacheMetricsFromProviderMetadata(
+    generateResult: Awaited<ReturnType<typeof generateText>>,
+  ): {
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+  } {
+    const providerMeta = generateResult.providerMetadata as
+      | Record<string, unknown>
+      | undefined;
+    if (!providerMeta) {
+      return {};
     }
+
+    // Anthropic surfaces cache metrics under providerMetadata.anthropic
+    const anthropicMeta = providerMeta.anthropic as
+      | Record<string, unknown>
+      | undefined;
+    if (anthropicMeta) {
+      const cacheCreationTokens = extractCacheCreationTokens(
+        anthropicMeta as Parameters<typeof extractCacheCreationTokens>[0],
+      );
+      const cacheReadTokens = extractCacheReadTokens(
+        anthropicMeta as Parameters<typeof extractCacheReadTokens>[0],
+      );
+      return {
+        ...(cacheCreationTokens !== undefined && { cacheCreationTokens }),
+        ...(cacheReadTokens !== undefined && { cacheReadTokens }),
+      };
+    }
+
+    return {};
   }
 
   /**
@@ -165,15 +588,26 @@ export class GenerationHandler {
   logGenerationComplete(
     generateResult: Awaited<ReturnType<typeof generateText>>,
   ): void {
-    logger.debug(`generateText completed`, {
-      provider: this.providerName,
-      model: this.modelName,
-      responseLength: generateResult.text?.length || 0,
-      toolResultsCount: generateResult.toolResults?.length || 0,
-      finishReason: generateResult.finishReason,
-      usage: generateResult.usage,
-      timestamp: Date.now(),
-    });
+    const cacheMetrics =
+      this.extractCacheMetricsFromProviderMetadata(generateResult);
+
+    if (logger.shouldLog("debug")) {
+      logger.debug(`generateText completed`, {
+        provider: this.providerName,
+        model: this.modelName,
+        responseLength: generateResult.text?.length || 0,
+        toolResultsCount: generateResult.toolResults?.length || 0,
+        finishReason: generateResult.finishReason,
+        usage: generateResult.usage,
+        ...(cacheMetrics.cacheCreationTokens !== undefined && {
+          cacheCreationTokens: cacheMetrics.cacheCreationTokens,
+        }),
+        ...(cacheMetrics.cacheReadTokens !== undefined && {
+          cacheReadTokens: cacheMetrics.cacheReadTokens,
+        }),
+        timestamp: Date.now(),
+      });
+    }
   }
 
   /**
@@ -251,23 +685,19 @@ export class GenerationHandler {
             const toolId =
               (trRecord.toolCallId as string) || (trRecord.id as string);
 
-            let toolArgs: StandardRecord = {};
-            if (trRecord.args) {
-              toolArgs = trRecord.args as StandardRecord;
-            } else if (trRecord.arguments) {
-              toolArgs = trRecord.arguments as StandardRecord;
-            } else if (trRecord.parameters) {
-              toolArgs = trRecord.parameters as StandardRecord;
-            } else if (trRecord.input) {
-              toolArgs = trRecord.input as StandardRecord;
-            } else {
-              toolArgs = toolCallArgsMap.get(toolId || toolName) || {};
-            }
+            const toolArgs: StandardRecord =
+              (trRecord.args as StandardRecord | undefined) ??
+              (trRecord.arguments as StandardRecord | undefined) ??
+              (trRecord.parameters as StandardRecord | undefined) ??
+              (trRecord.input as StandardRecord | undefined) ??
+              toolCallArgsMap.get(toolId || toolName) ??
+              {};
 
             toolExecutions.push({
               name: toolName,
               input: toolArgs,
-              output: (trRecord.result as unknown) ?? "success",
+              output:
+                ((trRecord.output ?? trRecord.result) as unknown) ?? "success",
             });
           }
         }
@@ -291,30 +721,65 @@ export class GenerationHandler {
     }>,
     options: TextGenerationOptions,
   ): EnhancedGenerateResult {
-    // Structured output check
+    // Structured output check — schema alone is sufficient to activate
     const useStructuredOutput =
-      !!options.schema &&
-      (options.output?.format === "json" ||
-        options.output?.format === "structured");
+      !!options.schema ||
+      options.output?.format === "json" ||
+      options.output?.format === "structured";
 
     let content: string;
+    let structuredData: unknown;
+    let jsonRepaired = false;
+    let jsonTruncated = false;
+    // Strip an outer ```json fence and coerce raw model text into canonical
+    // JSON. Object/array roots are recovered via balanced-scan + jsonrepair;
+    // scalar JSON roots (string/number/bool) via plain JSON.parse. When
+    // nothing JSON-shaped is recoverable, the raw text is returned unchanged,
+    // structuredData stays unset, and a WARN makes the broken case observable.
+    const coerceTextMode = (rawText: string): string => {
+      const strippedText = rawText
+        .replace(/^```(?:json)?\s*\n?/i, "")
+        .replace(/\n?```\s*$/i, "")
+        .trim();
+      const coerced = coerceJsonToSchema(strippedText, options.schema);
+      if (coerced) {
+        structuredData = coerced.structuredData;
+        if (coerced.repaired) {
+          jsonRepaired = true;
+        }
+        if (coerced.truncated) {
+          jsonTruncated = true;
+        }
+        return coerced.content;
+      }
+      try {
+        const scalar: unknown = JSON.parse(strippedText);
+        if (scalar !== null && scalar !== undefined) {
+          structuredData = scalar;
+          return strippedText;
+        }
+      } catch {
+        // not JSON at all — fall through to raw text + WARN
+      }
+      logger.warn(
+        "[GenerationHandler] schema requested but no JSON could be recovered from model text; returning raw text",
+        { provider: this.providerName, model: this.modelName },
+      );
+      return strippedText;
+    };
     if (useStructuredOutput) {
       try {
         const experimentalOutput = generateResult.experimental_output;
         if (experimentalOutput !== undefined) {
+          // AI-SDK already parsed + schema-validated the object. Expose it
+          // directly and serialise canonically — no hand-parsing needed.
+          structuredData = experimentalOutput;
           content = JSON.stringify(experimentalOutput);
         } else {
-          // Fall back to text parsing
-          const rawText = generateResult.text || "";
-          const strippedText = rawText
-            .replace(/^```(?:json)?\s*\n?/i, "")
-            .replace(/\n?```\s*$/i, "")
-            .trim();
-          content = strippedText;
+          content = coerceTextMode(generateResult.text || "");
         }
       } catch (outputError) {
-        // experimental_output is a getter that can throw NoObjectGeneratedError
-        // Fall back to text parsing when structured output fails
+        // experimental_output is a getter that can throw NoObjectGeneratedError.
         logger.debug(
           "[GenerationHandler] experimental_output threw, falling back to text parsing",
           {
@@ -324,26 +789,89 @@ export class GenerationHandler {
                 : String(outputError),
           },
         );
-        const rawText = generateResult.text || "";
-        const strippedText = rawText
-          .replace(/^```(?:json)?\s*\n?/i, "")
-          .replace(/\n?```\s*$/i, "")
-          .trim();
-        content = strippedText;
+        content = coerceTextMode(generateResult.text || "");
       }
     } else {
       content = generateResult.text;
     }
 
+    // Tie the coercion repair to the provider's truncation signal: if the
+    // response stopped on the token cap, treat the structured output as
+    // truncated regardless of which coerce candidate won, and warn.
+    if (useStructuredOutput && generateResult.finishReason === "length") {
+      jsonTruncated = true;
+      logger.warn(
+        "[GenerationHandler] Structured output truncated by token cap (finishReason=length); increase maxTokens",
+        { provider: this.providerName, model: this.modelName },
+      );
+    }
+
+    // Extract usage with support for different formats and reasoning tokens
+    // Note: The AI SDK bundles thinking tokens into promptTokens for Google models.
+    // Separate reasoningTokens tracking will work when/if the AI SDK adds support.
+    const usage = extractTokenUsage(generateResult.usage);
+
+    // Merge cache metrics from providerMetadata if not already present in usage
+    // The AI SDK's LanguageModelUsage doesn't include cache tokens; they come from
+    // provider-specific metadata (e.g. Anthropic's providerMetadata.anthropic)
+    if (
+      usage.cacheCreationTokens === undefined ||
+      usage.cacheReadTokens === undefined
+    ) {
+      const cacheMetrics =
+        this.extractCacheMetricsFromProviderMetadata(generateResult);
+      if (
+        usage.cacheCreationTokens === undefined &&
+        cacheMetrics.cacheCreationTokens !== undefined
+      ) {
+        usage.cacheCreationTokens = cacheMetrics.cacheCreationTokens;
+      }
+      if (
+        usage.cacheReadTokens === undefined &&
+        cacheMetrics.cacheReadTokens !== undefined
+      ) {
+        usage.cacheReadTokens = cacheMetrics.cacheReadTokens;
+      }
+      // Recalculate cache savings if we added cache metrics
+      if (usage.cacheReadTokens !== undefined) {
+        const savingsPercent = calculateCacheSavingsPercent(
+          usage.cacheReadTokens,
+          usage.input,
+        );
+        if (savingsPercent !== undefined) {
+          usage.cacheSavingsPercent = savingsPercent;
+        }
+      }
+    }
+
+    // Extract reasoning from AI SDK response (Anthropic thinking, Gemini thought, OpenAI o1)
+    // Handle both string and array (AI SDK v5 returns string, v6 returns ReasoningOutput[])
+    const rawReasoning = generateResult.reasoning;
+    const reasoning: string | undefined = rawReasoning
+      ? typeof rawReasoning === "string"
+        ? rawReasoning
+        : Array.isArray(rawReasoning)
+          ? rawReasoning
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              .map((r: any) =>
+                typeof r === "string" ? r : (r.text ?? JSON.stringify(r)),
+              )
+              .join("\n")
+          : String(rawReasoning)
+      : undefined;
+    const reasoningTokens: number | undefined = usage.reasoning ?? undefined;
+
     return {
       content,
-      usage: {
-        input: generateResult.usage?.promptTokens || 0,
-        output: generateResult.usage?.completionTokens || 0,
-        total: generateResult.usage?.totalTokens || 0,
-      },
+      structuredData,
+      usage,
+      finishReason: generateResult.finishReason,
+      jsonRepaired: jsonRepaired || undefined,
+      jsonTruncated: jsonTruncated || undefined,
       provider: this.providerName,
       model: this.modelName,
+      reasoning,
+      reasoningTokens,
       toolCalls: generateResult.toolCalls
         ? generateResult.toolCalls.map((tc: ToolCallObject) => ({
             toolCallId: tc.toolCallId || "unknown",
@@ -351,7 +879,7 @@ export class GenerationHandler {
             args: tc.args || {},
           }))
         : [],
-      toolResults: (generateResult.toolResults as ToolResult[]) || [],
+      toolResults: generateResult.toolResults ?? [],
       toolsUsed,
       toolExecutions,
       availableTools: Object.keys(tools).map((name) => {
@@ -359,7 +887,7 @@ export class GenerationHandler {
         return {
           name,
           description: tool.description || "No description available",
-          parameters: tool.parameters || {},
+          parameters: (tool.inputSchema as StandardRecord) || {},
           server: tool.serverId || "direct",
         };
       }),
@@ -374,7 +902,7 @@ export class GenerationHandler {
       provider: this.providerName,
       model: this.modelName,
       responseTextLength: (result.text as string)?.length || 0,
-      responsePreview: (result.text as string)?.substring(0, 500) + "...",
+      responsePreview: (result.text as string)?.substring(0, 500) ?? "",
       finishReason: result.finishReason,
       usage: result.usage,
     });

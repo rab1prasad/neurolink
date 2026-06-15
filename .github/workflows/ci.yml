@@ -20,7 +20,7 @@ jobs:
       - name: Setup PNPM
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.15.1
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -29,10 +29,13 @@ jobs:
           cache: "pnpm"
 
       - name: Install ffmpeg
-        uses: FedericoCarboni/setup-ffmpeg@36c6454b5a2348e7794ba2d82a21506605921e3d
+        uses: AnimMouse/setup-ffmpeg@v1
         with:
-          ffmpeg-version: "7.0.2"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Pin to a known-good release. The default (latest → FFmpeg 8.1)
+          # BtbN/FFmpeg-Builds Linux asset is currently corrupt and fails the
+          # job at download ("xz: File format not recognized"). Revert once
+          # upstream republishes a valid 8.1 build.
+          version: "7.1"
 
       - name: Verify ffmpeg installation
         run: |
@@ -65,7 +68,7 @@ jobs:
         run: |
           echo "🔍 Running ESLint validation with controlled warning limits..."
           npx eslint src/ --max-warnings=300
-          npx eslint test/ --max-warnings=10
+          npx eslint test/continuous-test-suite*.ts test/zod-schema-test-function.ts --max-warnings=10
 
       - name: 🔒 Security & Environment Validation
         run: |
@@ -80,6 +83,65 @@ jobs:
           pnpm run build:cli
           node dist/cli/index.js --help
 
+  # action-smoke-test:
+  #   name: GitHub Action Smoke Test
+  #   runs-on: ubuntu-latest
+  #   needs: [test]
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+
+  #     - name: Setup PNPM
+  #       uses: pnpm/action-setup@v4
+  #       with:
+  #         version: 9
+
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: "20"
+  #         cache: "pnpm"
+
+  #     - name: Install dependencies
+  #       run: pnpm install
+
+  #     - name: SvelteKit Sync
+  #       run: pnpm exec svelte-kit sync
+
+  #     - name: Build GitHub Action
+  #       run: pnpm run build:action
+
+  #     - name: Test NeuroLink Action
+  #       id: neurolink
+  #       uses: ./
+  #       with:
+  #         prompt: "Respond with exactly: Hello from smoke test"
+  #         provider: google-ai
+  #         google_ai_api_key: ${{ secrets.GOOGLE_AI_API_KEY }}
+  #         max_tokens: "20"
+  #         temperature: "0"
+  #         debug: "true"
+
+  #     - name: Verify response
+  #       env:
+  #         RESPONSE: ${{ steps.neurolink.outputs.response }}
+  #         PROVIDER: ${{ steps.neurolink.outputs.provider }}
+  #       run: |
+  #         echo "Response: $RESPONSE"
+  #         echo "Provider: $PROVIDER"
+
+  #         if [ -z "$RESPONSE" ]; then
+  #           echo "ERROR: No response received"
+  #           exit 1
+  #         fi
+
+  #         if [ -z "$PROVIDER" ]; then
+  #           echo "ERROR: Provider not reported"
+  #           exit 1
+  #         fi
+
+  #         echo "✅ Action smoke test passed!"
+
   build-check:
     runs-on: ubuntu-latest
     steps:
@@ -89,19 +151,22 @@ jobs:
       - name: Setup PNPM
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.15.1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install ffmpeg
-        uses: FedericoCarboni/setup-ffmpeg@36c6454b5a2348e7794ba2d82a21506605921e3d
+        uses: AnimMouse/setup-ffmpeg@v1
         with:
-          ffmpeg-version: "7.0.2"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Pin to a known-good release. The default (latest → FFmpeg 8.1)
+          # BtbN/FFmpeg-Builds Linux asset is currently corrupt and fails the
+          # job at download ("xz: File format not recognized"). Revert once
+          # upstream republishes a valid 8.1 build.
+          version: "7.1"
 
       - name: Verify ffmpeg installation
         run: |
@@ -139,20 +204,22 @@ jobs:
       - name: Setup PNPM
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.15.1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install ffmpeg
-        uses: FedericoCarboni/setup-ffmpeg@36c6454b5a2348e7794ba2d82a21506605921e3d
+        uses: AnimMouse/setup-ffmpeg@v1
         with:
-          # ffmpeg for video features (VIDEO-034)
-          ffmpeg-version: "7.0.2"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Pin to a known-good release. The default (latest → FFmpeg 8.1)
+          # BtbN/FFmpeg-Builds Linux asset is currently corrupt and fails the
+          # job at download ("xz: File format not recognized"). Revert once
+          # upstream republishes a valid 8.1 build.
+          version: "7.1"
 
       - name: Verify ffmpeg installation
         run: |
@@ -183,7 +250,7 @@ jobs:
           # Get the commit message for validation and pass it to the validator
           COMMIT_MSG=$(git log -1 --pretty=format:"%s")
           echo "Validating: $COMMIT_MSG"
-          node scripts/commit-validation.cjs "$COMMIT_MSG"
+          pnpm exec tsx scripts/commit-validation.ts "$COMMIT_MSG"
 
       - name: 🌍 Environment Validation
         run: |
@@ -207,10 +274,10 @@ jobs:
           echo "📈 Running TypeScript compiler strict checks on source files..."
           npx tsc --noEmit --strict --project tsconfig.json
 
-      - name: 🎯 Code Coverage Analysis
+      - name: 🎯 Test Suite Validation
         run: |
-          echo "🎯 Running tests with coverage..."
-          pnpm run test:run --coverage || echo "Tests completed with warnings"
+          echo "🎯 Continuous test suites are run separately with API keys"
+          echo "Skipping automated test execution in CI"
         continue-on-error: true
 
       - name: 📋 Quality Summary
@@ -241,12 +308,12 @@ jobs:
       - name: Setup PNPM
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.15.1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies

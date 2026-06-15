@@ -3,19 +3,25 @@
  * Provides consistent parameter validation across all tool interfaces
  */
 
-import type {
-  StandardRecord,
-  ValidationSchema,
-  StringArray,
-} from "../types/typeAliases.js";
-import type { EnhancedValidationResult } from "../types/tools.js";
-import type { StreamOptions } from "../types/streamTypes.js";
-import type {
-  TextGenerationOptions,
-  GenerateOptions,
-} from "../types/generateTypes.js";
-import type { NeuroLinkMCPTool } from "../types/mcpTypes.js";
+import type { AIProviderName } from "../constants/enums.js";
+import { VIDEO_ERROR_CODES } from "../constants/videoErrors.js";
 import { SYSTEM_LIMITS } from "../core/constants.js";
+import type {
+  GenerateOptions,
+  TextGenerationOptions,
+  NeuroLinkMCPTool,
+  VideoOutputOptions,
+  StreamOptions,
+  EnhancedValidationResult,
+  AudienceOption,
+  PPTOutputOptions,
+  ThemeOption,
+  ToneOption,
+  StandardRecord,
+  StringArray,
+  ValidationSchema,
+} from "../types/index.js";
+import { ErrorFactory, type NeuroLinkError } from "./errorHandling.js";
 import { isNonNullObject } from "./typeUtils.js";
 
 // ============================================================================
@@ -402,10 +408,24 @@ export function validateTextGenerationOptions(
 
   const opts = options as Partial<TextGenerationOptions>;
 
-  // Validate prompt
-  const promptError = validateRequiredString(opts.prompt, "prompt", 1);
-  if (promptError) {
-    errors.push(promptError);
+  // Modality dispatch (output.mode === 'video' | 'avatar' | 'music') carries
+  // its own typed prompt inside `output.{video|avatar|music}`. The textual
+  // prompt is irrelevant for these modes, so skip the prompt-required check.
+  // Same exemption applies for STT-driven flows where `input.text` is
+  // synthesized from transcription downstream.
+  const outputMode = (opts as { output?: { mode?: string } }).output?.mode;
+  const isMediaModalityMode =
+    outputMode === "video" || outputMode === "avatar" || outputMode === "music";
+  const hasSttAudio = !!(
+    opts as { stt?: { enabled?: boolean; audio?: unknown } }
+  ).stt?.audio;
+
+  // Validate prompt (skipped for modality dispatch + STT-driven flows)
+  if (!isMediaModalityMode && !hasSttAudio) {
+    const promptError = validateRequiredString(opts.prompt, "prompt", 1);
+    if (promptError) {
+      errors.push(promptError);
+    }
   }
 
   if (opts.prompt && opts.prompt.length > SYSTEM_LIMITS.MAX_PROMPT_LENGTH) {
@@ -704,6 +724,791 @@ export function validateToolBatch(tools: Record<string, unknown>): {
     invalidTools,
     results,
   };
+}
+
+// ============================================================================
+// VIDEO GENERATION VALIDATORS
+// ============================================================================
+
+/**
+ * Convert a NeuroLinkError to a ValidationError shape
+ * Used to maintain consistent error types in validation results
+ */
+function toValidationError(error: NeuroLinkError): ValidationError {
+  // Field can be on error directly or in context (from ErrorFactory methods)
+  const field =
+    (error as { field?: string }).field ??
+    (error.context as { field?: string } | undefined)?.field;
+  return new ValidationError(
+    error.message,
+    field,
+    error.code,
+    (error as { suggestions?: StringArray }).suggestions,
+  );
+}
+
+/**
+ * Valid video generation options
+ */
+const VALID_VIDEO_RESOLUTIONS = ["720p", "1080p"] as const;
+// Cross-provider literal whitelist: Vertex Veo uses 4 / 6 / 8 s, Kling and
+// Runway use 5 / 10 s. The handler-level adapter is the source of truth
+// for per-provider rejection (e.g. Runway 400 for length=4); this gate
+// just rejects obviously invalid integers.
+const VALID_VIDEO_LENGTHS = [4, 5, 6, 8, 10] as const;
+const VALID_VIDEO_ASPECT_RATIOS = ["9:16", "16:9"] as const;
+const MAX_VIDEO_PROMPT_LENGTH = 500;
+const MAX_VIDEO_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+
+/**
+ * Validate video output options (resolution, length, aspect ratio, audio)
+ *
+ * @param options - VideoOutputOptions to validate
+ * @returns NeuroLinkError if invalid, null if valid
+ *
+ * @example
+ * ```typescript
+ * const error = validateVideoOutputOptions({ resolution: "4K", length: 10 });
+ * // error.code === "INVALID_VIDEO_RESOLUTION"
+ * ```
+ */
+export function validateVideoOutputOptions(
+  options: VideoOutputOptions,
+): NeuroLinkError | null {
+  // Validate resolution
+  if (
+    options.resolution &&
+    !VALID_VIDEO_RESOLUTIONS.includes(
+      options.resolution as (typeof VALID_VIDEO_RESOLUTIONS)[number],
+    )
+  ) {
+    return ErrorFactory.invalidVideoResolution(options.resolution);
+  }
+
+  // Validate length
+  if (
+    options.length !== undefined &&
+    !VALID_VIDEO_LENGTHS.includes(
+      options.length as (typeof VALID_VIDEO_LENGTHS)[number],
+    )
+  ) {
+    return ErrorFactory.invalidVideoLength(options.length);
+  }
+
+  // Validate aspect ratio
+  if (
+    options.aspectRatio &&
+    !VALID_VIDEO_ASPECT_RATIOS.includes(
+      options.aspectRatio as (typeof VALID_VIDEO_ASPECT_RATIOS)[number],
+    )
+  ) {
+    return ErrorFactory.invalidVideoAspectRatio(options.aspectRatio);
+  }
+
+  // Validate audio (must be boolean if provided)
+  if (options.audio !== undefined && typeof options.audio !== "boolean") {
+    return ErrorFactory.invalidVideoAudio(options.audio);
+  }
+
+  return null;
+}
+
+/**
+ * Validate image input for video generation
+ *
+ * Checks image format (magic bytes) and size constraints.
+ * Supports JPEG, PNG, and WebP formats.
+ *
+ * @param image - Image buffer to validate
+ * @param maxSize - Maximum allowed size in bytes (default: 10MB)
+ * @returns NeuroLinkError if invalid, null if valid
+ *
+ * @example
+ * ```typescript
+ * const imageBuffer = readFileSync("product.jpg");
+ * const error = validateImageForVideo(imageBuffer);
+ * if (error) throw error;
+ * ```
+ */
+export function validateImageForVideo(
+  image: Buffer | string,
+  maxSize: number = MAX_VIDEO_IMAGE_SIZE,
+): NeuroLinkError | null {
+  // Handle null/undefined
+  if (image === null || image === undefined) {
+    return ErrorFactory.invalidImageType();
+  }
+
+  // If string (URL or path), skip detailed validation
+  if (typeof image === "string") {
+    // Basic URL/path validation
+    if (image.trim().length === 0) {
+      return ErrorFactory.emptyImagePath();
+    }
+    return null;
+  }
+
+  // Ensure it's a Buffer
+  if (!Buffer.isBuffer(image)) {
+    return ErrorFactory.invalidImageType();
+  }
+
+  // Check size
+  if (image.length > maxSize) {
+    const sizeMB = (image.length / 1024 / 1024).toFixed(2);
+    const maxMB = (maxSize / 1024 / 1024).toFixed(0);
+    return ErrorFactory.imageTooLarge(sizeMB, maxMB);
+  }
+
+  // Check minimum size (at least a few bytes for magic number detection)
+  if (image.length < 8) {
+    return ErrorFactory.imageTooSmall();
+  }
+
+  // Check magic bytes for supported formats
+  const isJPEG = image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff;
+  const isPNG =
+    image[0] === 0x89 &&
+    image[1] === 0x50 &&
+    image[2] === 0x4e &&
+    image[3] === 0x47;
+
+  // WebP requires both RIFF header AND WEBP signature
+  // Check for WebP: RIFF at bytes 0-3 AND "WEBP" at bytes 8-11
+  const isWebP =
+    image.length >= 12 &&
+    image[0] === 0x52 &&
+    image[1] === 0x49 &&
+    image[2] === 0x46 &&
+    image[3] === 0x46 && // RIFF header
+    image[8] === 0x57 &&
+    image[9] === 0x45 &&
+    image[10] === 0x42 &&
+    image[11] === 0x50; // WEBP signature
+
+  const isValidFormat = isJPEG || isPNG || isWebP;
+
+  if (!isValidFormat) {
+    return ErrorFactory.invalidImageFormat();
+  }
+
+  return null;
+}
+
+/**
+ * Validate complete video generation input
+ *
+ * Validates all requirements for video generation:
+ * - output.mode must be "video"
+ * - Must have exactly one input image
+ * - Prompt must be within length limits
+ * - Video output options must be valid
+ *
+ * @param options - GenerateOptions to validate for video generation
+ * @returns EnhancedValidationResult with errors, warnings, and suggestions
+ *
+ * @example
+ * ```typescript
+ * const validation = validateVideoGenerationInput({
+ *   input: { text: "Product showcase video", images: [imageBuffer] },
+ *   output: { mode: "video", video: { resolution: "1080p" } }
+ * });
+ * if (!validation.isValid) {
+ *   console.error(validation.errors);
+ * }
+ * ```
+ */
+export function validateVideoGenerationInput(
+  options: GenerateOptions,
+): EnhancedValidationResult {
+  const errors: ValidationError[] = [];
+  const warnings: string[] = [];
+  const suggestions: StringArray = [];
+
+  // Must have video mode
+  if (options.output?.mode !== "video") {
+    errors.push(toValidationError(ErrorFactory.invalidVideoMode()));
+  }
+
+  // Must have at least one image
+  if (!options.input?.images || options.input.images.length === 0) {
+    errors.push(toValidationError(ErrorFactory.missingVideoImage()));
+  } else if (options.input.images.length > 1) {
+    // Warn if multiple images provided - only first will be used
+    warnings.push(
+      "Only the first image will be used for video generation. Additional images will be ignored.",
+    );
+    suggestions.push("Provide a single image for video generation");
+  }
+
+  // Validate the first image if present
+  if (options.input?.images && options.input.images.length > 0) {
+    const firstImage = options.input.images[0];
+    // Handle ImageWithAltText type
+    const imageData =
+      typeof firstImage === "object" && "data" in firstImage
+        ? firstImage.data
+        : firstImage;
+
+    // Skip validation for URL/path strings, validate Buffers
+    if (typeof imageData !== "string") {
+      const imageError = validateImageForVideo(imageData as Buffer);
+      if (imageError) {
+        errors.push(toValidationError(imageError));
+      }
+    }
+  }
+
+  // Validate prompt/text - trim once for consistency
+  const trimmedPrompt = options.input?.text?.trim() || "";
+  if (trimmedPrompt.length === 0) {
+    errors.push(toValidationError(ErrorFactory.emptyVideoPrompt()));
+  } else if (trimmedPrompt.length > MAX_VIDEO_PROMPT_LENGTH) {
+    errors.push(
+      toValidationError(
+        ErrorFactory.videoPromptTooLong(
+          trimmedPrompt.length,
+          MAX_VIDEO_PROMPT_LENGTH,
+        ),
+      ),
+    );
+  }
+
+  // Validate video output options if provided
+  if (options.output?.video) {
+    const videoError = validateVideoOutputOptions(options.output.video);
+    if (videoError) {
+      errors.push(toValidationError(videoError));
+    }
+  }
+
+  // Add helpful suggestions
+  if (errors.length === 0 && warnings.length === 0) {
+    suggestions.push(
+      "Video generation takes 60-180 seconds. Consider setting a longer timeout.",
+    );
+  }
+
+  return { isValid: errors.length === 0, errors, warnings, suggestions };
+}
+
+// ============================================================================
+// DIRECTOR MODE VALIDATION
+// ============================================================================
+
+const MIN_DIRECTOR_SEGMENTS = 2;
+const MAX_DIRECTOR_SEGMENTS = 10;
+const VALID_TRANSITION_DURATIONS = [4, 6, 8] as const;
+
+/**
+ * Validate Director Mode input: segments, transition prompts, and durations.
+ *
+ * @param options - GenerateOptions with input.segments and output.director
+ * @returns EnhancedValidationResult with errors, warnings, and suggestions
+ */
+export function validateDirectorModeInput(
+  options: GenerateOptions,
+): EnhancedValidationResult {
+  const errors: ValidationError[] = [];
+  const warnings: string[] = [];
+  const suggestions: StringArray = [];
+
+  const segments = options.input?.segments;
+
+  if (!segments || !Array.isArray(segments)) {
+    errors.push(
+      new ValidationError(
+        "Director Mode requires an input.segments array",
+        "input.segments",
+        VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_MISMATCH,
+      ),
+    );
+    return { isValid: false, errors, warnings, suggestions };
+  }
+
+  if (
+    segments.length < MIN_DIRECTOR_SEGMENTS ||
+    segments.length > MAX_DIRECTOR_SEGMENTS
+  ) {
+    errors.push(
+      new ValidationError(
+        `Director Mode requires ${MIN_DIRECTOR_SEGMENTS}-${MAX_DIRECTOR_SEGMENTS} segments, got ${segments.length}`,
+        "input.segments",
+        segments.length > MAX_DIRECTOR_SEGMENTS
+          ? VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_LIMIT_EXCEEDED
+          : VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_MISMATCH,
+      ),
+    );
+    return { isValid: false, errors, warnings, suggestions };
+  }
+
+  // Validate each segment
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (!seg || typeof seg !== "object") {
+      errors.push(
+        new ValidationError(
+          `Segment ${i} must be an object with prompt and image`,
+          `input.segments[${i}]`,
+          VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_MISMATCH,
+        ),
+      );
+      continue;
+    }
+    if (
+      !seg.prompt ||
+      typeof seg.prompt !== "string" ||
+      seg.prompt.trim().length === 0
+    ) {
+      errors.push(
+        new ValidationError(
+          `Segment ${i} requires a non-empty prompt`,
+          `input.segments[${i}].prompt`,
+          VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_MISMATCH,
+        ),
+      );
+    }
+    if (seg.image === undefined || seg.image === null) {
+      errors.push(
+        new ValidationError(
+          `Segment ${i} requires a valid image (Buffer, URL, path, or ImageWithAltText)`,
+          `input.segments[${i}].image`,
+          VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_MISMATCH,
+        ),
+      );
+    }
+  }
+
+  // Validate director options
+  const director = options.output?.director;
+  const expectedTransitions = segments.length - 1;
+
+  if (director?.transitionPrompts) {
+    if (director.transitionPrompts.length !== expectedTransitions) {
+      errors.push(
+        new ValidationError(
+          `Expected ${expectedTransitions} transition prompts, got ${director.transitionPrompts.length}`,
+          "output.director.transitionPrompts",
+          VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_MISMATCH,
+        ),
+      );
+    }
+  }
+
+  if (director?.transitionDurations) {
+    if (director.transitionDurations.length !== expectedTransitions) {
+      errors.push(
+        new ValidationError(
+          `Expected ${expectedTransitions} transition durations, got ${director.transitionDurations.length}`,
+          "output.director.transitionDurations",
+          VIDEO_ERROR_CODES.DIRECTOR_SEGMENT_MISMATCH,
+        ),
+      );
+    } else {
+      for (let i = 0; i < director.transitionDurations.length; i++) {
+        const d = director.transitionDurations[i];
+        if (!VALID_TRANSITION_DURATIONS.includes(d)) {
+          errors.push(
+            new ValidationError(
+              `Invalid transition duration at index ${i}: ${d}. Use 4, 6, or 8`,
+              `output.director.transitionDurations[${i}]`,
+              VIDEO_ERROR_CODES.DIRECTOR_INVALID_TRANSITION_DURATION,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  // Validate video output options if provided
+  if (options.output?.video) {
+    const videoError = validateVideoOutputOptions(options.output.video);
+    if (videoError) {
+      errors.push(toValidationError(videoError));
+    }
+  }
+
+  if (errors.length === 0) {
+    const totalCalls = segments.length + expectedTransitions;
+    suggestions.push(
+      `Director Mode will make ${totalCalls} API calls (${segments.length} clips + ${expectedTransitions} transitions). Ensure adequate timeout.`,
+    );
+  }
+
+  return { isValid: errors.length === 0, errors, warnings, suggestions };
+}
+
+// ============================================================================
+// PPT VALIDATION (Presentation Generation)
+// ============================================================================
+
+/**
+ * Valid PPT generation options
+ */
+const VALID_PPT_THEMES = [
+  "modern",
+  "corporate",
+  "creative",
+  "minimal",
+  "dark",
+] as const;
+const VALID_PPT_AUDIENCES = [
+  "business",
+  "students",
+  "technical",
+  "general",
+] as const;
+const VALID_PPT_TONES = [
+  "professional",
+  "casual",
+  "educational",
+  "persuasive",
+] as const;
+const VALID_PPT_ASPECT_RATIOS = ["16:9", "4:3"] as const;
+const VALID_PPT_FORMATS = ["pptx"] as const;
+export const MIN_PPT_PAGES = 5;
+export const MAX_PPT_PAGES = 50;
+export const MIN_PPT_PROMPT_LENGTH = 10;
+export const MAX_PPT_PROMPT_LENGTH = 1000;
+
+/**
+ * Validate PPT output options (pages, theme, audience, tone, etc.)
+ *
+ * @param options - PPTOutputOptions to validate
+ * @returns NeuroLinkError if invalid, null if valid
+ *
+ * @example
+ * ```typescript
+ * const error = validatePPTOutputOptions({ pages: 100, theme: "invalid" });
+ * // error.code === "INVALID_PPT_PAGES"
+ * ```
+ */
+export function validatePPTOutputOptions(
+  options: PPTOutputOptions,
+): NeuroLinkError | null {
+  // Validate pages (slide count) - REQUIRED
+  if (options.pages === undefined || options.pages === null) {
+    return ErrorFactory.invalidPPTPages(undefined, "pages is required");
+  }
+
+  if (typeof options.pages !== "number") {
+    return ErrorFactory.invalidPPTPages(options.pages, "not a number");
+  }
+
+  if (!Number.isInteger(options.pages)) {
+    return ErrorFactory.invalidPPTPages(options.pages, "not an integer");
+  }
+
+  if (options.pages < MIN_PPT_PAGES || options.pages > MAX_PPT_PAGES) {
+    return ErrorFactory.invalidPPTPages(
+      options.pages,
+      `out of range (${MIN_PPT_PAGES}-${MAX_PPT_PAGES})`,
+    );
+  }
+
+  // Validate format
+  if (
+    options.format !== undefined &&
+    !VALID_PPT_FORMATS.includes(options.format)
+  ) {
+    return ErrorFactory.invalidPPTFormat(options.format);
+  }
+
+  // Validate theme - optional (if not provided, AI will decide)
+  if (
+    options.theme !== undefined &&
+    !VALID_PPT_THEMES.includes(options.theme as ThemeOption)
+  ) {
+    return ErrorFactory.invalidPPTOutputOptions(
+      "theme",
+      options.theme,
+      Array.from(VALID_PPT_THEMES),
+    );
+  }
+
+  // Validate audience - optional (if not provided, AI will decide)
+  if (
+    options.audience !== undefined &&
+    !VALID_PPT_AUDIENCES.includes(options.audience as AudienceOption)
+  ) {
+    return ErrorFactory.invalidPPTOutputOptions(
+      "audience",
+      options.audience,
+      Array.from(VALID_PPT_AUDIENCES),
+    );
+  }
+
+  // Validate tone - optional (if not provided, AI will decide)
+  if (
+    options.tone !== undefined &&
+    !VALID_PPT_TONES.includes(options.tone as ToneOption)
+  ) {
+    return ErrorFactory.invalidPPTOutputOptions(
+      "tone",
+      options.tone,
+      Array.from(VALID_PPT_TONES),
+    );
+  }
+
+  // Validate aspectRatio
+  if (
+    options.aspectRatio !== undefined &&
+    !VALID_PPT_ASPECT_RATIOS.includes(options.aspectRatio)
+  ) {
+    return ErrorFactory.invalidPPTOutputOptions(
+      "aspectRatio",
+      options.aspectRatio,
+      Array.from(VALID_PPT_ASPECT_RATIOS),
+    );
+  }
+
+  // Validate generateAIImages (must be boolean if provided)
+  if (
+    options.generateAIImages !== undefined &&
+    typeof options.generateAIImages !== "boolean"
+  ) {
+    return ErrorFactory.invalidPPTOutputOptions(
+      "generateAIImages",
+      options.generateAIImages,
+      ["true", "false"],
+    );
+  }
+
+  // Validate logoPath (string path, Buffer, or ImageWithAltText)
+  if (options.logoPath !== undefined) {
+    if (typeof options.logoPath === "string") {
+      if (options.logoPath.trim().length === 0) {
+        return ErrorFactory.invalidPPTLogoPath(
+          options.logoPath,
+          "empty string",
+        );
+      }
+    } else if (Buffer.isBuffer(options.logoPath)) {
+      // ok
+    } else if (
+      typeof options.logoPath === "object" &&
+      "data" in options.logoPath
+    ) {
+      const data = (options.logoPath as { data: unknown }).data;
+      if (typeof data === "string") {
+        if (data.trim().length === 0) {
+          return ErrorFactory.invalidPPTLogoPath(
+            options.logoPath,
+            "empty string",
+          );
+        }
+      } else if (!Buffer.isBuffer(data)) {
+        return ErrorFactory.invalidPPTLogoPath(
+          options.logoPath,
+          "invalid data type",
+        );
+      }
+    } else {
+      return ErrorFactory.invalidPPTLogoPath(options.logoPath, "invalid type");
+    }
+  }
+
+  // Validate outputPath (must be non-empty string if provided)
+  if (options.outputPath !== undefined) {
+    if (typeof options.outputPath !== "string") {
+      return ErrorFactory.invalidPPTOutputPath(
+        options.outputPath,
+        "not a string",
+      );
+    }
+    if (options.outputPath.trim().length === 0) {
+      return ErrorFactory.invalidPPTOutputPath(
+        options.outputPath,
+        "empty string",
+      );
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validate PPT provider (supports vertex, openai, azure, anthropic, google-ai, bedrock)
+ *
+ * @param provider - Provider name to validate
+ * @returns NeuroLinkError if invalid, null if valid
+ *
+ * @example
+ * ```typescript
+ * const error = validatePPTProvider("unsupported-provider");
+ * // error.code === "INVALID_PPT_PROVIDER"
+ * ```
+ */
+export function validatePPTProvider(
+  provider: AIProviderName | string,
+): NeuroLinkError | null {
+  // PPT generation supported providers (subset of all AIProviderName values)
+  // Supports major LLM providers with structured output capabilities
+  const validProviders = [
+    "vertex",
+    "openai",
+    "azure",
+    "anthropic",
+    "google-ai",
+    "bedrock",
+  ];
+
+  // Convert enum or string to lowercase string for comparison
+  const providerString = String(provider).toLowerCase();
+
+  if (!validProviders.includes(providerString)) {
+    return ErrorFactory.invalidPPTProvider(provider);
+  }
+
+  return null;
+}
+
+/**
+ * Validate complete PPT generation input
+ *
+ * Validates all requirements for presentation generation:
+ * - output.mode must be "ppt"
+ * - Prompt must be within length limits
+ * - PPT output options must be valid
+ *
+ * @param options - GenerateOptions to validate for PPT generation
+ * @returns EnhancedValidationResult with errors, warnings, and suggestions
+ *
+ * @example
+ * ```typescript
+ * const validation = validatePPTGenerationInput({
+ *   input: { text: "Introducing Our New Product" },
+ *   output: { mode: "ppt", ppt: { pages: 10, theme: "modern" } }
+ * });
+ * if (!validation.isValid) {
+ *   console.error(validation.errors);
+ * }
+ * ```
+ */
+export function validatePPTGenerationInput(
+  options: GenerateOptions,
+): EnhancedValidationResult {
+  const errors: ValidationError[] = [];
+  const warnings: string[] = [];
+  const suggestions: StringArray = [];
+
+  // Validate prompt/text - must exist first
+  if (!options.input?.text) {
+    errors.push(
+      toValidationError(
+        ErrorFactory.invalidPPTPrompt("input.text is required"),
+      ),
+    );
+    // Return early since we can't validate further
+    return { isValid: false, errors, warnings, suggestions };
+  }
+
+  // Validate prompt/text - trim once for consistency
+  const trimmedPrompt = options.input.text.trim();
+  if (trimmedPrompt === "") {
+    errors.push(
+      toValidationError(ErrorFactory.invalidPPTPrompt("empty prompt")),
+    );
+  } else if (trimmedPrompt.length < MIN_PPT_PROMPT_LENGTH) {
+    errors.push(
+      toValidationError(
+        ErrorFactory.invalidPPTPrompt(
+          `prompt too short (${trimmedPrompt.length} characters, minimum ${MIN_PPT_PROMPT_LENGTH} required)`,
+        ),
+      ),
+    );
+  } else if (trimmedPrompt.length > MAX_PPT_PROMPT_LENGTH) {
+    errors.push(
+      toValidationError(
+        ErrorFactory.invalidPPTPrompt(
+          `prompt too long (${trimmedPrompt.length} characters, max ${MAX_PPT_PROMPT_LENGTH})`,
+        ),
+      ),
+    );
+  }
+
+  // image PPT options if provided
+  if (options.input.images && options.input.images.length > 0) {
+    warnings.push(
+      "Images can be unused in PPT generation due to fail in quality standards and can lead to longer generation times.",
+    );
+    suggestions.push(
+      "Only provide high-quality, relevant images for PPT generation.",
+    );
+  }
+
+  // Validate provider (optional - only validate if explicitly provided)
+  if (options.provider !== undefined) {
+    const providerError = validatePPTProvider(options.provider);
+    if (providerError) {
+      errors.push(toValidationError(providerError));
+    }
+  }
+
+  // Mode is optional, but if provided must be "ppt"
+  if (options.output?.mode !== undefined && options.output.mode !== "ppt") {
+    errors.push(toValidationError(ErrorFactory.invalidPPTMode()));
+  }
+
+  // Validate PPT output options
+  if (options.output?.ppt) {
+    const pptError = validatePPTOutputOptions(options.output.ppt);
+    if (pptError) {
+      errors.push(toValidationError(pptError));
+    }
+
+    // Add specific warnings
+    const pages = options.output.ppt.pages;
+    if (pages !== undefined && pages > 30) {
+      warnings.push(
+        `Generating ${pages} slides may take significant time (estimated: ${Math.ceil(pages * 3)}-${Math.ceil(pages * 5)} seconds)`,
+      );
+    }
+
+    if (
+      options.output.ppt.generateAIImages === undefined ||
+      options.output.ppt.generateAIImages === true
+    ) {
+      suggestions.push(
+        "AI image generation is enabled. Each slide with images will take additional time (~2-5 seconds per image).",
+      );
+    }
+
+    // Add suggestion about AI selection being used for undefined values
+    const aiSelections: string[] = [];
+    if (options.output.ppt.theme === undefined) {
+      aiSelections.push("theme");
+    }
+    if (options.output.ppt.audience === undefined) {
+      aiSelections.push("audience");
+    }
+    if (options.output.ppt.tone === undefined) {
+      aiSelections.push("tone");
+    }
+    if (aiSelections.length > 0) {
+      suggestions.push(
+        `AI will decide: ${aiSelections.join(", ")} (based on topic analysis)`,
+      );
+    }
+  } else {
+    errors.push(
+      toValidationError(
+        ErrorFactory.missingPPTProperty("output.ppt", [
+          "Provide PPT generation options under output.ppt",
+          "pages is required, theme/audience/tone are optional (AI will decide if not specified)",
+        ]),
+      ),
+    );
+  }
+
+  // Add helpful suggestions
+  if (errors.length === 0 && warnings.length === 0) {
+    suggestions.push(
+      "PPT generation typically takes 30-120 seconds depending on slide count and image generation.",
+    );
+  }
+
+  return { isValid: errors.length === 0, errors, warnings, suggestions };
 }
 
 // ============================================================================

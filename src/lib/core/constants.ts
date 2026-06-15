@@ -3,11 +3,125 @@
  * Single source of truth for all default values
  */
 
+// Image Generation Model Identifiers
+// Used to detect if a model is an image generation model (not text generation).
+// `isImageGenerationModel(name)` (below) does boundary-aware matching:
+// the modelName must equal an entry OR contain an entry followed by a
+// non-alphanumeric character (`-`, `_`, `:`, `/`, `.`, end-of-string).
+// This prevents short identifiers like `"V_1"` or `"gpt-image-1"` from
+// accidentally matching unrelated model names that happen to embed them.
+export const IMAGE_GENERATION_MODELS = [
+  // Gemini image models (Vertex AI, Google AI Studio)
+  "gemini-3-pro-image-preview",
+  "gemini-2.5-flash-image",
+  "gemini-3.1-flash-image-preview",
+
+  // Stability AI (direct provider — image-only)
+  "stable-image-ultra",
+  "stable-image-core",
+  "sd3.5-large",
+  "sd3.5-large-turbo",
+  "sd3.5-medium",
+
+  // Ideogram (direct provider — image-only). API uses model-version
+  // identifiers like "V_1", "V_1_TURBO", "V_2", "V_2_TURBO", "V_2A",
+  // "V_2A_TURBO", "V_3". Keep prefixes that won't collide with generic
+  // text-model names.
+  "V_1",
+  "V_1_TURBO",
+  "V_2",
+  "V_2_TURBO",
+  "V_2A",
+  "V_2A_TURBO",
+  "V_3",
+
+  // Recraft (direct provider — image-only)
+  "recraftv3",
+  "recraftv2",
+
+  // OpenAI image models (DALL-E + GPT-Image). Substring match keeps
+  // version variants like "dall-e-3" / "dall-e-2" routed correctly.
+  "gpt-image-1",
+  "dall-e-3",
+  "dall-e-2",
+
+  // Replicate-hosted image models (matched on model slug prefix).
+  // Replicate model slugs are passed through as-is via the LLM
+  // provider; image-gen models trigger the image-gen path.
+  "black-forest-labs/flux",
+  "stability-ai/sdxl",
+  "stability-ai/stable-diffusion",
+];
+
+/**
+ * Boundary-aware test for whether `modelName` represents an image-generation
+ * model.
+ *
+ * Matches when the model name **equals** an entry in
+ * {@link IMAGE_GENERATION_MODELS} or contains the entry as a prefix followed
+ * by a separator (`-`, `_`, `:`, `/`, `.`) or end-of-string. This avoids
+ * accidental matches such as a custom fine-tune named `"my-V_1"` matching
+ * `"V_1"` via plain substring inclusion.
+ */
+export function isImageGenerationModel(modelName: string | undefined): boolean {
+  if (!modelName) {
+    return false;
+  }
+  for (const entry of IMAGE_GENERATION_MODELS) {
+    if (modelName === entry) {
+      return true;
+    }
+    const idx = modelName.indexOf(entry);
+    if (idx === -1) {
+      continue;
+    }
+    const before = idx === 0 ? "" : modelName[idx - 1];
+    const after = modelName[idx + entry.length] ?? "";
+    const isBoundary = (ch: string): boolean =>
+      ch === "" || /[-_:./@]/.test(ch);
+    if (isBoundary(before) && isBoundary(after)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// PDF Image Generation Models
+// Models that support generating images from PDFs
+export const PDF_IMAGE_GENERATION_MODELS = [
+  "gemini-3-pro-image-preview",
+  "gemini-3.1-flash-image-preview",
+];
+
+// Global Location Models
+// Models that require global location configuration (uses aiplatform.googleapis.com instead of region-specific endpoints)
+// Includes Gemini 3.x text and image models, which are only available via the global endpoint on Vertex AI.
+// IMAGE_GENERATION_MODELS is spread in to keep the two lists from drifting:
+// any new image-gen model added there is automatically routed to global here.
+export const GLOBAL_LOCATION_MODELS = [
+  // Image generation (sourced from IMAGE_GENERATION_MODELS)
+  ...IMAGE_GENERATION_MODELS,
+  // Gemini 3.1 text models (global-only)
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-flash-lite-preview",
+  "gemini-3.1-pro-preview-customtools",
+  // Gemini 3 text models (global-only)
+  "gemini-3-pro-preview",
+  "gemini-3-pro-preview-11-2025",
+  "gemini-3-pro-latest",
+  "gemini-3-flash-preview",
+];
+
 // Core AI Generation Defaults
 export const DEFAULT_MAX_TOKENS = undefined; // Unlimited by default - let providers decide their own limits
 export const DEFAULT_TEMPERATURE = 0.7;
 export const DEFAULT_TIMEOUT = 60000;
 export const DEFAULT_MAX_STEPS = 200;
+export const DEFAULT_TOOL_MAX_RETRIES = 2; // Maximum retries per tool before permanently failing
+
+// Fire-and-forget tool storage writes (Redis). 5s is generous for a single
+// Redis write; if breached, the .catch logs a warning.
+export const TOOL_STORAGE_TIMEOUT_MS = 5000;
 
 // Step execution limits
 export const STEP_LIMITS = {
@@ -82,6 +196,14 @@ export const CLI_LIMITS = {
     max: 2,
     default: DEFAULT_TEMPERATURE,
   },
+};
+
+// PDF Processing Limits
+export const PDF_LIMITS = {
+  // Maximum PDF size for image conversion (20MB)
+  MAX_SIZE_MB: 20,
+  // Default maximum pages for image conversion
+  DEFAULT_MAX_PAGES: 20,
 };
 
 // Performance and System Limits

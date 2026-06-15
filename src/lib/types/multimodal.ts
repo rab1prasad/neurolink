@@ -145,6 +145,197 @@ export type AudioContent = {
 };
 
 /**
+ * Known video provider identifiers shipped with NeuroLink.
+ *
+ * `(string & {})` keeps the union open for custom provider names
+ * registered via `VideoProcessor.registerHandler()`.
+ */
+export type VideoProviderName =
+  | "vertex"
+  | "kling"
+  | "runway"
+  | "replicate"
+  | (string & {});
+
+/**
+ * Video output configuration options for video generation
+ *
+ * Used with `output.video` in GenerateOptions when `output.mode` is "video".
+ * Controls resolution, duration, aspect ratio, and audio settings for generated videos.
+ *
+ * @example
+ * ```typescript
+ * const videoOptions: VideoOutputOptions = {
+ *   resolution: "1080p",
+ *   length: 8,
+ *   aspectRatio: "16:9",
+ *   audio: true
+ * };
+ * ```
+ */
+export type VideoOutputOptions = {
+  /**
+   * Per-call cancellation signal forwarded to provider requests and polling
+   * loops. When aborted, long-running video generation is interrupted and
+   * the handler throws a non-retriable abort error.
+   */
+  abortSignal?: AbortSignal;
+  /**
+   * Override the video-gen provider. Defaults to `"vertex"` when omitted.
+   *
+   * Registered providers are managed via `VideoProcessor.registerHandler`
+   * (see src/lib/utils/videoProcessor.ts). Examples: `"vertex"`, `"kling"`,
+   * `"runway"`, `"replicate"`. An unknown provider throws
+   * `VIDEO_ERROR_CODES.PROVIDER_NOT_SUPPORTED` — there is no implicit
+   * fallback to the LLM provider name.
+   */
+  provider?: VideoProviderName;
+  /**
+   * Specific model to use within the provider. Provider-specific shape
+   * (e.g. "veo-3.1-generate-001" for vertex; "atonamy/wan-alpha:..." for
+   * replicate).
+   */
+  model?: string;
+  /** Output resolution - "720p" (1280x720) or "1080p" (1920x1080) */
+  resolution?: "720p" | "1080p";
+  /**
+   * Video duration in seconds. Provider-specific support — Vertex Veo
+   * accepts 4 / 6 / 8 s, Kling and Runway accept 5 / 10 s, Replicate is
+   * model-specific. The type intentionally enumerates the common shipped
+   * values; pass any other positive number for custom Replicate models.
+   */
+  length?: 4 | 5 | 6 | 8 | 10 | (number & {});
+  /** Aspect ratio - "9:16" for portrait, "16:9" for landscape, "1:1" for square */
+  aspectRatio?: "9:16" | "16:9" | "1:1";
+  /** Enable audio generation (default: true) */
+  audio?: boolean;
+  /**
+   * Publicly accessible URL of the input image.
+   * Required by providers that do not accept inline base64 data (e.g. PiAPI Kling).
+   * When provided and the provider requires a URL, this takes precedence over the
+   * `image` Buffer argument passed to `generate()`.
+   */
+  imageUrl?: string;
+  /**
+   * Per-call provider credentials. Takes precedence over instance-level
+   * credentials set at construction time, which in turn override env vars.
+   */
+  credentials?: import("./providers.js").NeurolinkCredentials;
+};
+
+// ============================================
+// DIRECTOR MODE TYPES
+// ============================================
+
+/**
+ * A single segment in Director Mode, representing one video clip.
+ */
+export type DirectorSegment = {
+  /** Prompt describing the video content for this segment */
+  prompt: string;
+  /** Input image for this segment (Buffer, URL string, file path, or ImageWithAltText) */
+  image: Buffer | string | ImageWithAltText;
+};
+
+/**
+ * Director Mode configuration options.
+ * Used when `input.segments` is provided to control transition generation.
+ */
+export type DirectorModeOptions = {
+  /**
+   * Prompts for generating transition clips (array of N-1 entries for N segments).
+   * transitionPrompts[i] is used for the transition between segment i and segment i+1.
+   * If omitted, defaults to "Smooth cinematic transition between scenes".
+   */
+  transitionPrompts?: string[];
+
+  /**
+   * Duration of each transition clip in seconds (array of N-1 entries for N segments).
+   * Each value must be 4, 6, or 8 (4 recommended for seamless feel).
+   * If omitted, all transitions default to 4 seconds.
+   * @default [4, 4, ...]
+   */
+  transitionDurations?: Array<4 | 6 | 8>;
+};
+
+/**
+ * Result type for generated video content
+ *
+ * Returned in `GenerateResult.video` when video generation is successful.
+ * Contains the raw video buffer and associated metadata.
+ *
+ * @example
+ * ```typescript
+ * const result = await neurolink.generate({
+ *   input: { text: "Product showcase", images: [imageBuffer] },
+ *   provider: "vertex",
+ *   model: "veo-3.1",
+ *   output: { mode: "video" }
+ * });
+ *
+ * if (result.video) {
+ *   writeFileSync("output.mp4", result.video.data);
+ *   console.log(`Duration: ${result.video.metadata?.duration}s`);
+ * }
+ * ```
+ */
+export type VideoGenerationResult = {
+  /** Raw video data as Buffer */
+  data: Buffer;
+  /** Video media type */
+  mediaType: "video/mp4" | "video/webm";
+  /** Video metadata */
+  metadata?: {
+    /** Original filename if applicable */
+    filename?: string;
+    /** Video duration in seconds */
+    duration?: number;
+    /** Video dimensions */
+    dimensions?: {
+      width: number;
+      height: number;
+    };
+    /** Frame rate in fps */
+    frameRate?: number;
+    /** Video codec used */
+    codec?: string;
+    /** Model used for generation */
+    model?: string;
+    /** Provider used for generation */
+    provider?: string;
+    /** Aspect ratio of the video */
+    aspectRatio?: string;
+    /** Whether audio was enabled during generation */
+    audioEnabled?: boolean;
+    /** Processing time in milliseconds */
+    processingTime?: number;
+
+    // Director Mode fields (present when Director Mode is used)
+    /** Number of main segments in the video */
+    segmentCount?: number;
+    /** Number of transition clips generated */
+    transitionCount?: number;
+    /** Duration of each main clip in seconds */
+    clipDuration?: number;
+    /** Durations of each transition in seconds (one per transition) */
+    transitionDurations?: number[];
+    /** Per-segment metadata */
+    segments?: Array<{
+      index: number;
+      duration: number;
+      processingTime: number;
+    }>;
+    /** Per-transition metadata */
+    transitions?: Array<{
+      fromSegment: number;
+      toSegment: number;
+      duration: number;
+      processingTime: number;
+    }>;
+  };
+};
+
+/**
  * Video content type for multimodal messages
  *
  * NOTE: This is for FILE-BASED video input.
@@ -261,6 +452,22 @@ export type MultimodalInput = {
 
   /** Video files for file-based video processing (future) */
   videoFiles?: Array<Buffer | string>;
+
+  /**
+   * Director Mode segments for multi-clip video generation.
+   * Each segment contains a prompt and image for generating one video clip.
+   * Automatically enables Director Mode when provided.
+   *
+   * @example
+   * ```typescript
+   * segments: [
+   *   { prompt: "Product reveal", image: imageBuffer1 },
+   *   { prompt: "Feature showcase", image: "./image2.jpg" },
+   *   { prompt: "Call to action", image: { data: imageBuffer3, altText: "CTA" } }
+   * ]
+   * ```
+   */
+  segments?: DirectorSegment[];
 };
 
 // ============================================
@@ -289,6 +496,9 @@ export type MultimodalChatMessage = {
 
   /** Content of the message - can be text or multimodal content array */
   content: string | MessageContent[];
+
+  /** Provider-specific options (e.g. Anthropic cache_control) */
+  providerOptions?: Record<string, unknown>;
 };
 
 /**
@@ -396,6 +606,46 @@ export function isVideoContent(content: Content): content is VideoContent {
  * Type guard to check if input contains multimodal content
  * Now includes audio and video detection
  */
+/**
+ * Type guard to validate if an object matches the DirectorSegment shape.
+ * Checks for required prompt (string) and image (Buffer, string, or ImageWithAltText).
+ */
+function isDirectorSegment(segment: unknown): segment is DirectorSegment {
+  if (!segment || typeof segment !== "object") {
+    return false;
+  }
+
+  const maybeSegment = segment as DirectorSegment;
+
+  // Check for required prompt field
+  if (typeof maybeSegment.prompt !== "string" || !maybeSegment.prompt) {
+    return false;
+  }
+
+  // Check for required image field
+  const { image } = maybeSegment;
+  if (!image) {
+    return false;
+  }
+
+  // Validate image type: Buffer, string (URL/path), or ImageWithAltText
+  if (Buffer.isBuffer(image)) {
+    return true;
+  }
+
+  if (typeof image === "string") {
+    return true;
+  }
+
+  // Check for ImageWithAltText structure
+  if (typeof image === "object" && "data" in image) {
+    const imgData = (image as ImageWithAltText).data;
+    return Buffer.isBuffer(imgData) || typeof imgData === "string";
+  }
+
+  return false;
+}
+
 export function isMultimodalInput(input: unknown): input is MultimodalInput {
   const maybeInput = input as MultimodalInput;
   return !!(
@@ -405,7 +655,10 @@ export function isMultimodalInput(input: unknown): input is MultimodalInput {
     maybeInput?.files?.length ||
     maybeInput?.content?.length ||
     maybeInput?.audioFiles?.length ||
-    maybeInput?.videoFiles?.length
+    maybeInput?.videoFiles?.length ||
+    (maybeInput?.segments?.length &&
+      Array.isArray(maybeInput.segments) &&
+      maybeInput.segments.every(isDirectorSegment))
   );
 }
 
@@ -417,3 +670,80 @@ export function isMultimodalMessageContent(
 ): content is MessageContent[] {
   return Array.isArray(content);
 }
+
+// =============================================================================
+// DIRECTOR PIPELINE (from adapters/video/directorPipeline.ts)
+// =============================================================================
+
+/** Result of a single director-mode clip generation. */
+export type ClipResult = { buffer: Buffer; processingTime: number };
+
+/** Completion status for ordered circuit-breaker tracking. */
+export type ClipCompletion =
+  | { status: "pending" }
+  | { status: "success"; result: ClipResult }
+  | { status: "failure"; error: Error };
+
+/** State shared across clip-generation tasks for circuit-breaker logic. */
+export type ClipGenState = {
+  consecutiveFailures: number;
+  circuitOpen: boolean;
+  results: Array<ClipResult | null>;
+  completions: ClipCompletion[];
+  nextExpectedIndex: number;
+};
+
+/** Result of a single director-mode transition generation. */
+export type TransitionResult = {
+  buffer: Buffer | null;
+  fromSegment: number;
+  toSegment: number;
+  duration: number;
+  processingTime: number;
+};
+
+// =============================================================================
+// VERTEX VIDEO (from adapters/video/vertexVideoHandler.ts)
+// =============================================================================
+
+/** Polling result envelope returned by Vertex Veo long-running operations. */
+export type VertexOperationResult = {
+  done?: boolean;
+  response?: {
+    videos?: Array<{
+      bytesBase64Encoded?: string;
+      gcsUri?: string;
+    }>;
+  };
+  error?: {
+    message?: string;
+  };
+};
+
+// =============================================================================
+// IMAGE COMPRESSOR (from utils/imageCompressor.ts)
+// =============================================================================
+
+/** Output format accepted by the image compressor. */
+export type SupportedFormat = "jpeg" | "png" | "webp";
+
+/** Options consumed by compressImage(). */
+export type CompressionOptions = {
+  provider: import("./providers.js").ProviderName;
+  quality?: number;
+  maxDimension?: number;
+  format?: SupportedFormat;
+};
+
+/** Result of compressImage() with metadata. */
+export type CompressionResult = {
+  buffer: Buffer;
+  originalSize: number;
+  compressedSize: number;
+  compressionRatio: number;
+  metadata: {
+    width: number;
+    height: number;
+    format: string;
+  };
+};

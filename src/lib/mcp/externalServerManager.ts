@@ -8,16 +8,16 @@
  */
 
 import { EventEmitter } from "events";
-import type { ChildProcess } from "child_process";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { mcpLogger } from "../utils/logger.js";
 import { MCPClientFactory } from "./mcpClientFactory.js";
 import { ToolDiscoveryService } from "./toolDiscoveryService.js";
 import { toolRegistry } from "./toolRegistry.js";
-import type { HITLManager } from "../hitl/hitlManager.js";
-import { HITLUserRejectedError, HITLTimeoutError } from "../hitl/hitlErrors.js";
 import type {
+  HITLManager,
+  JsonValue,
+  JsonObject,
+  UnknownRecord,
+  ServerLoadResult,
   ExternalMCPServerInstance,
   ExternalMCPServerStatus,
   ExternalMCPServerHealth,
@@ -26,16 +26,94 @@ import type {
   ExternalMCPServerEvents,
   ExternalMCPManagerConfig,
   ExternalMCPToolInfo,
-} from "../types/externalMcp.js";
-import type {
+  RuntimeMCPServerInfo,
   MCPServerInfo,
   MCPServerCategory,
   MCPTransportType,
-} from "../types/mcpTypes.js";
-import type { JsonValue, JsonObject, UnknownRecord } from "../types/common.js";
+} from "../types/index.js";
+import { HITLUserRejectedError, HITLTimeoutError } from "../hitl/hitlErrors.js";
 import { detectCategory } from "../utils/mcpDefaults.js";
-import type { ServerLoadResult } from "../types/typeAliases.js";
+
 import { isObject, isNonNullObject } from "../utils/typeUtils.js";
+import { TelemetryService } from "../telemetry/telemetryService.js";
+import { tracers } from "../telemetry/tracers.js";
+import { SpanStatusCode } from "@opentelemetry/api";
+
+/**
+ * Recursively substitute environment variables in strings
+ * Replaces ${VAR_NAME} with the value from process.env.VAR_NAME
+ * @param value - Value to process (string, object, array, or primitive)
+ * @returns Processed value with environment variables substituted
+ */
+function substituteEnvVariables<T>(value: T): T {
+  if (typeof value === "string") {
+    // Replace ${VAR_NAME} with process.env.VAR_NAME
+    return value.replace(/\$\{([^}]+)\}/g, (match, varName) => {
+      const envValue = process.env[varName.trim()];
+      if (envValue === undefined) {
+        mcpLogger.warn(
+          `[ExternalServerManager] Environment variable ${varName} is not defined, using empty string`,
+        );
+        return "";
+      }
+      return envValue;
+    }) as T;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => substituteEnvVariables(item)) as T;
+  }
+
+  if (isNonNullObject(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      result[key] = substituteEnvVariables(val);
+    }
+    return result as T;
+  }
+
+  return value;
+}
+
+/**
+ * Sensitive CLI flag patterns whose following value should be masked in logs.
+ */
+const SENSITIVE_ARG_PATTERNS =
+  /^--(api-key|token|secret|password|key|figma-api-key|access-token|auth|credential)$/i;
+
+/**
+ * Redact values that follow sensitive flags in a CLI args array.
+ * Handles: "--api-key sk-abc", "--api-key=sk-abc", consecutive flags.
+ * E.g. ["--api-key", "sk-abc123"] → ["--api-key", "[REDACTED]"]
+ *      ["--api-key=sk-abc123"]    → ["--api-key=[REDACTED]"]
+ */
+function redactSensitiveArgs(args?: string[]): string[] | undefined {
+  if (!args || args.length === 0) {
+    return args;
+  }
+  const redacted = [...args];
+  for (let i = 0; i < redacted.length; i++) {
+    // Handle --flag=value inline form
+    const eqIdx = redacted[i].indexOf("=");
+    if (eqIdx !== -1) {
+      const flag = redacted[i].substring(0, eqIdx);
+      if (SENSITIVE_ARG_PATTERNS.test(flag)) {
+        redacted[i] = `${flag}=[REDACTED]`;
+      }
+      continue;
+    }
+    // Handle --flag value (two-part form)
+    if (
+      SENSITIVE_ARG_PATTERNS.test(redacted[i]) &&
+      i + 1 < redacted.length &&
+      !redacted[i + 1].startsWith("--")
+    ) {
+      redacted[i + 1] = "[REDACTED]";
+      i++; // skip the redacted value
+    }
+  }
+  return redacted;
+}
 
 /**
  * Type guard to validate if an object can be safely used as Record<string, JsonValue>
@@ -84,6 +162,7 @@ function safeMetadataConversion(
 
 /**
  * Type guard to validate external MCP server configuration
+ * Supports both stdio transport (requires command) and HTTP transport (requires url)
  */
 function isValidExternalMCPServerConfig(
   config: unknown,
@@ -103,8 +182,16 @@ function isValidExternalMCPServerConfig(
     }
   }
 
+  // Must have either command (for stdio) or url (for HTTP/SSE transport)
+  const hasCommand = typeof record.command === "string";
+  const hasUrl = typeof record.url === "string";
+
+  if (!hasCommand && !hasUrl) {
+    return false;
+  }
+
   return (
-    typeof record.command === "string" &&
+    (record.command === undefined || typeof record.command === "string") &&
     (record.args === undefined || Array.isArray(record.args)) &&
     (record.env === undefined || isNonNullObject(record.env)) &&
     (record.transport === undefined || typeof record.transport === "string") &&
@@ -116,6 +203,11 @@ function isValidExternalMCPServerConfig(
       typeof record.autoRestart === "boolean") &&
     (record.cwd === undefined || typeof record.cwd === "string") &&
     (record.url === undefined || typeof record.url === "string") &&
+    (record.headers === undefined || isNonNullObject(record.headers)) &&
+    (record.httpOptions === undefined || isNonNullObject(record.httpOptions)) &&
+    (record.retryConfig === undefined || isNonNullObject(record.retryConfig)) &&
+    (record.rateLimiting === undefined ||
+      isNonNullObject(record.rateLimiting)) &&
     (record.metadata === undefined || isNonNullObject(record.metadata))
   );
 }
@@ -124,42 +216,6 @@ function isValidExternalMCPServerConfig(
  * ExternalServerManager
  * Core class for managing external MCP servers
  */
-/**
- * Extended MCPServerInfo with runtime state for external servers
- * This represents the transition towards zero-conversion architecture
- */
-interface RuntimeMCPServerInfo extends MCPServerInfo {
-  // Runtime-only fields not in MCPServerInfo
-  process: ChildProcess | null;
-  client: Client | null;
-  transportInstance: Transport | null; // Rename to avoid conflict with MCPServerInfo.transport
-  lastError?: string;
-  startTime?: Date;
-  lastHealthCheck?: Date;
-  reconnectAttempts: number;
-  maxReconnectAttempts: number;
-  capabilities?: Record<string, JsonValue>;
-  healthTimer?: NodeJS.Timeout;
-  restartTimer?: NodeJS.Timeout;
-  metrics: {
-    totalConnections: number;
-    totalDisconnections: number;
-    totalErrors: number;
-    totalToolCalls: number;
-    averageResponseTime: number;
-    lastResponseTime: number;
-  };
-  // Legacy compatibility - maintain tools map for now
-  toolsMap: Map<string, ExternalMCPToolInfo>;
-  toolsArray?: Array<{
-    name: string;
-    description: string;
-    inputSchema?: object;
-  }>;
-  // Compatibility field for existing code
-  config: MCPServerInfo;
-}
-
 export class ExternalServerManager extends EventEmitter {
   private servers: Map<string, RuntimeMCPServerInfo> = new Map();
   private config: Required<ExternalMCPManagerConfig>;
@@ -175,9 +231,15 @@ export class ExternalServerManager extends EventEmitter {
     super();
 
     // Set defaults for configuration
+    // Default timeout increased to 60s and made configurable via MCP_CLIENT_TIMEOUT
+    // to accommodate MCP server startup latency (especially concurrent stdio servers)
+    const defaultMcpTimeout = Math.max(
+      5000,
+      Number(process.env.MCP_CLIENT_TIMEOUT) || 60000,
+    );
     this.config = {
       maxServers: config.maxServers ?? 10,
-      defaultTimeout: config.defaultTimeout ?? 10000,
+      defaultTimeout: config.defaultTimeout ?? defaultMcpTimeout,
       defaultHealthCheckInterval: config.defaultHealthCheckInterval ?? 30000,
       enableAutoRestart: config.enableAutoRestart ?? true,
       maxRestartAttempts: config.maxRestartAttempts ?? 3,
@@ -195,17 +257,37 @@ export class ExternalServerManager extends EventEmitter {
 
     // Forward tool discovery events
     this.toolDiscovery.on("toolRegistered", (event) => {
-      this.emit("toolDiscovered", event);
+      this.emit("toolDiscovered", {
+        ...event,
+        serverName: this.getServerName(event.serverId),
+      });
     });
 
     this.toolDiscovery.on("toolUnregistered", (event) => {
-      this.emit("toolRemoved", event);
+      this.emit("toolRemoved", {
+        ...event,
+        serverName: this.getServerName(event.serverId),
+      });
     });
 
     // Handle process cleanup
     process.on("SIGINT", () => this.shutdown());
     process.on("SIGTERM", () => this.shutdown());
     process.on("beforeExit", () => this.shutdown());
+  }
+
+  /**
+   * Attach a McpOutputNormalizer to the underlying ToolDiscoveryService.
+   * All tool outputs will be measured and (if oversized) replaced with compact
+   * surrogates before being returned to callers.
+   */
+  setOutputNormalizer(
+    normalizer: import("./mcpOutputNormalizer.js").McpOutputNormalizer,
+  ): void {
+    this.toolDiscovery.setOutputNormalizer(normalizer);
+    mcpLogger.debug(
+      "[ExternalServerManager] MCP output normalizer attached to ToolDiscoveryService",
+    );
   }
 
   /**
@@ -230,6 +312,15 @@ export class ExternalServerManager extends EventEmitter {
    */
   getHITLManager(): HITLManager | undefined {
     return this.hitlManager;
+  }
+
+  /**
+   * Resolve the human-readable server name for an event payload.
+   * Falls back to serverId if the instance or config.name isn't available.
+   */
+  getServerName(serverId: string): string {
+    const instance = this.servers.get(serverId);
+    return instance?.config?.name || serverId;
   }
 
   /**
@@ -299,19 +390,27 @@ export class ExternalServerManager extends EventEmitter {
             const externalConfig: MCPServerInfo = {
               id: serverId,
               name: serverId,
-              description: `External MCP server: ${serverId}`,
+              description:
+                typeof serverConfig.description === "string"
+                  ? serverConfig.description
+                  : `External MCP server: ${serverId}`,
               transport:
                 typeof serverConfig.transport === "string"
                   ? (serverConfig.transport as MCPTransportType)
                   : "stdio",
               status: "initializing" as const,
               tools: [],
-              command: serverConfig.command as string,
+              command:
+                typeof serverConfig.command === "string"
+                  ? serverConfig.command
+                  : undefined,
               args: Array.isArray(serverConfig.args)
                 ? (serverConfig.args as string[])
                 : [],
               env: isNonNullObject(serverConfig.env)
-                ? (serverConfig.env as Record<string, string>)
+                ? substituteEnvVariables(
+                    serverConfig.env as Record<string, string>,
+                  )
                 : {},
               timeout:
                 typeof serverConfig.timeout === "number"
@@ -337,6 +436,21 @@ export class ExternalServerManager extends EventEmitter {
                 typeof serverConfig.url === "string"
                   ? serverConfig.url
                   : undefined,
+              // HTTP transport-specific fields
+              headers: isNonNullObject(serverConfig.headers)
+                ? substituteEnvVariables(
+                    serverConfig.headers as Record<string, string>,
+                  )
+                : undefined,
+              httpOptions: isNonNullObject(serverConfig.httpOptions)
+                ? (serverConfig.httpOptions as MCPServerInfo["httpOptions"])
+                : undefined,
+              retryConfig: isNonNullObject(serverConfig.retryConfig)
+                ? (serverConfig.retryConfig as MCPServerInfo["retryConfig"])
+                : undefined,
+              rateLimiting: isNonNullObject(serverConfig.rateLimiting)
+                ? (serverConfig.rateLimiting as MCPServerInfo["rateLimiting"])
+                : undefined,
               blockedTools: Array.isArray(serverConfig.blockedTools)
                 ? (serverConfig.blockedTools as string[])
                 : undefined,
@@ -451,19 +565,27 @@ export class ExternalServerManager extends EventEmitter {
           const externalConfig: MCPServerInfo = {
             id: serverId,
             name: serverId,
-            description: `External MCP server: ${serverId}`,
+            description:
+              typeof serverConfig.description === "string"
+                ? serverConfig.description
+                : `External MCP server: ${serverId}`,
             transport:
               typeof serverConfig.transport === "string"
                 ? (serverConfig.transport as MCPTransportType)
                 : "stdio",
             status: "initializing" as const,
             tools: [],
-            command: serverConfig.command as string,
+            command:
+              typeof serverConfig.command === "string"
+                ? serverConfig.command
+                : undefined,
             args: Array.isArray(serverConfig.args)
               ? (serverConfig.args as string[])
               : [],
             env: isNonNullObject(serverConfig.env)
-              ? (serverConfig.env as Record<string, string>)
+              ? substituteEnvVariables(
+                  serverConfig.env as Record<string, string>,
+                )
               : {},
             timeout:
               typeof serverConfig.timeout === "number"
@@ -489,6 +611,21 @@ export class ExternalServerManager extends EventEmitter {
               typeof serverConfig.url === "string"
                 ? serverConfig.url
                 : undefined,
+            // HTTP transport-specific fields
+            headers: isNonNullObject(serverConfig.headers)
+              ? substituteEnvVariables(
+                  serverConfig.headers as Record<string, string>,
+                )
+              : undefined,
+            httpOptions: isNonNullObject(serverConfig.httpOptions)
+              ? (serverConfig.httpOptions as MCPServerInfo["httpOptions"])
+              : undefined,
+            retryConfig: isNonNullObject(serverConfig.retryConfig)
+              ? (serverConfig.retryConfig as MCPServerInfo["retryConfig"])
+              : undefined,
+            rateLimiting: isNonNullObject(serverConfig.rateLimiting)
+              ? (serverConfig.rateLimiting as MCPServerInfo["rateLimiting"])
+              : undefined,
             blockedTools: Array.isArray(serverConfig.blockedTools)
               ? (serverConfig.blockedTools as string[])
               : undefined,
@@ -544,24 +681,30 @@ export class ExternalServerManager extends EventEmitter {
       errors.push("Server ID is required and must be a string");
     }
 
-    if (!config.command || typeof config.command !== "string") {
-      errors.push("Command is required and must be a string");
+    if (!["stdio", "sse", "websocket", "http"].includes(config.transport)) {
+      errors.push("Transport must be one of: stdio, sse, websocket, http");
     }
 
-    if (!Array.isArray(config.args)) {
-      errors.push("Args must be an array");
-    }
-
-    if (!["stdio", "sse", "websocket"].includes(config.transport)) {
-      errors.push("Transport must be one of: stdio, sse, websocket");
-    }
-
-    // URL validation for non-stdio transports
-    if (
-      (config.transport === "sse" || config.transport === "websocket") &&
-      !config.url
+    // Transport-specific validation
+    if (config.transport === "stdio") {
+      // stdio transport requires command
+      if (!config.command || typeof config.command !== "string") {
+        errors.push(
+          "Command is required and must be a string for stdio transport",
+        );
+      }
+      if (!Array.isArray(config.args)) {
+        errors.push("Args must be an array");
+      }
+    } else if (
+      config.transport === "sse" ||
+      config.transport === "websocket" ||
+      config.transport === "http"
     ) {
-      errors.push(`URL is required for ${config.transport} transport`);
+      // HTTP-based transports require URL
+      if (!config.url || typeof config.url !== "string") {
+        errors.push(`URL is required for ${config.transport} transport`);
+      }
     }
 
     // Warnings for common issues
@@ -611,15 +754,15 @@ export class ExternalServerManager extends EventEmitter {
       env: config.env,
       tools: [], // Will be populated after server connection
       blockedTools: config.blockedTools,
+      // Preserve top-level operational fields so startServer can read them
+      timeout: config.timeout,
+      retries: config.retries,
+      healthCheckInterval: config.healthCheckInterval,
+      autoRestart: config.autoRestart,
+      cwd: config.cwd,
+      url: config.url,
       metadata: {
         category: "external" as MCPServerCategory,
-        // Store additional ExternalMCPServerConfig fields in metadata
-        timeout: config.timeout,
-        retries: config.retries,
-        healthCheckInterval: config.healthCheckInterval,
-        autoRestart: config.autoRestart,
-        cwd: config.cwd,
-        url: config.url,
         ...(safeMetadataConversion(config.metadata) || {}),
       },
     };
@@ -680,14 +823,19 @@ export class ExternalServerManager extends EventEmitter {
         command: serverInfo.command || "",
         args: serverInfo.args || [],
         env: serverInfo.env || {},
-        timeout: serverInfo.metadata?.timeout as number,
-        retries: serverInfo.metadata?.retries as number,
-        healthCheckInterval: serverInfo.metadata?.healthCheckInterval as number,
-        autoRestart: serverInfo.metadata?.autoRestart as boolean,
-        cwd: serverInfo.metadata?.cwd as string,
-        url: serverInfo.metadata?.url as string,
+        timeout: serverInfo.timeout,
+        retries: serverInfo.retries,
+        healthCheckInterval: serverInfo.healthCheckInterval,
+        autoRestart: serverInfo.autoRestart,
+        cwd: serverInfo.cwd,
+        url: serverInfo.url,
         blockedTools: serverInfo.blockedTools,
         metadata: safeMetadataConversion(serverInfo.metadata),
+        // HTTP transport-specific fields
+        headers: serverInfo.headers,
+        httpOptions: serverInfo.httpOptions,
+        retryConfig: serverInfo.retryConfig,
+        rateLimiting: serverInfo.rateLimiting,
       };
 
       const validation = this.validateConfig(tempConfig);
@@ -817,6 +965,9 @@ export class ExternalServerManager extends EventEmitter {
 
       mcpLogger.info(`[ExternalServerManager] Removing server: ${serverId}`);
 
+      // Capture name before deletion removes the instance
+      const serverName = this.getServerName(serverId);
+
       // Stop the server
       await this.stopServer(serverId);
 
@@ -826,6 +977,7 @@ export class ExternalServerManager extends EventEmitter {
       // Emit event
       this.emit("disconnected", {
         serverId,
+        serverName,
         reason: "Manually removed",
         timestamp: new Date(),
       } satisfies ExternalMCPServerEvents["disconnected"]);
@@ -865,12 +1017,23 @@ export class ExternalServerManager extends EventEmitter {
 
     const config = instance.config;
 
+    const span = tracers.mcp.startSpan("neurolink.mcp.server.start", {
+      attributes: {
+        "mcp.server_id": serverId,
+        "mcp.transport": config.transport,
+        "mcp.command_name": config.command
+          ? config.command.split(/[\\/]/).pop() || ""
+          : "",
+        "mcp.command_present": Boolean(config.command),
+      },
+    });
+
     try {
       this.updateServerStatus(serverId, "connecting");
 
       mcpLogger.debug(`[ExternalServerManager] Starting server: ${serverId}`, {
         command: config.command,
-        args: config.args,
+        args: redactSensitiveArgs(config.args),
         transport: config.transport,
       });
 
@@ -949,9 +1112,13 @@ export class ExternalServerManager extends EventEmitter {
       // Emit connected event
       this.emit("connected", {
         serverId,
+        serverName: this.getServerName(serverId),
         toolCount: instance.toolsMap.size,
         timestamp: new Date(),
       } satisfies ExternalMCPServerEvents["connected"]);
+
+      span.setAttribute("mcp.tool_count", instance.toolsMap.size);
+      span.setStatus({ code: SpanStatusCode.OK });
 
       mcpLogger.info(
         `[ExternalServerManager] Server started successfully: ${serverId}`,
@@ -964,7 +1131,18 @@ export class ExternalServerManager extends EventEmitter {
       this.updateServerStatus(serverId, "failed");
       instance.lastError =
         error instanceof Error ? error.message : String(error);
+
+      span.recordException(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : String(error),
+      });
+
       throw error;
+    } finally {
+      span.end();
     }
   }
 
@@ -976,6 +1154,12 @@ export class ExternalServerManager extends EventEmitter {
     if (!instance) {
       return;
     }
+
+    const span = tracers.mcp.startSpan("neurolink.mcp.server.stop", {
+      attributes: {
+        "mcp.server_id": serverId,
+      },
+    });
 
     try {
       this.updateServerStatus(serverId, "stopping");
@@ -1020,6 +1204,8 @@ export class ExternalServerManager extends EventEmitter {
       }
       this.updateServerStatus(serverId, "stopped");
 
+      span.setStatus({ code: SpanStatusCode.OK });
+
       mcpLogger.info(`[ExternalServerManager] Server stopped: ${serverId}`);
     } catch (error) {
       mcpLogger.error(
@@ -1027,6 +1213,16 @@ export class ExternalServerManager extends EventEmitter {
         error,
       );
       this.updateServerStatus(serverId, "failed");
+
+      span.recordException(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      span.end();
     }
   }
 
@@ -1060,6 +1256,7 @@ export class ExternalServerManager extends EventEmitter {
     // Emit status change event
     this.emit("statusChanged", {
       serverId,
+      serverName: this.getServerName(serverId),
       oldStatus,
       newStatus,
       timestamp: new Date(),
@@ -1090,6 +1287,7 @@ export class ExternalServerManager extends EventEmitter {
     // Emit failed event
     this.emit("failed", {
       serverId,
+      serverName: this.getServerName(serverId),
       error: error.message,
       timestamp: new Date(),
     } satisfies ExternalMCPServerEvents["failed"]);
@@ -1120,12 +1318,16 @@ export class ExternalServerManager extends EventEmitter {
     // Emit disconnected event
     this.emit("disconnected", {
       serverId,
+      serverName: this.getServerName(serverId),
       reason,
       timestamp: new Date(),
     } satisfies ExternalMCPServerEvents["disconnected"]);
 
-    // Attempt restart if enabled
-    if (this.config.enableAutoRestart && !this.isShuttingDown) {
+    // Attempt restart if enabled — prefer server-specific setting, fall back to global
+    if (
+      (instance.config.autoRestart ?? this.config.enableAutoRestart) &&
+      !this.isShuttingDown
+    ) {
       this.scheduleRestart(serverId);
     } else {
       this.updateServerStatus(serverId, "disconnected");
@@ -1169,18 +1371,41 @@ export class ExternalServerManager extends EventEmitter {
       return;
     } // already scheduled
     instance.restartTimer = setTimeout(async () => {
+      const restartSpan = tracers.mcp.startSpan(
+        "neurolink.mcp.server.restart",
+        {
+          attributes: {
+            "mcp.server_id": serverId,
+            "mcp.restart_attempt": instance.reconnectAttempts,
+            "mcp.restart_delay_ms": delay,
+          },
+        },
+      );
+
       try {
         await this.stopServer(serverId);
         await this.startServer(serverId);
 
         // Reset restart attempts on successful restart
         instance.reconnectAttempts = 0;
+        restartSpan.setStatus({ code: SpanStatusCode.OK });
       } catch (error) {
         mcpLogger.error(
           `[ExternalServerManager] Restart failed for ${serverId}:`,
           error,
         );
+
+        restartSpan.recordException(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+        restartSpan.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: error instanceof Error ? error.message : String(error),
+        });
+
         this.scheduleRestart(serverId); // Try again
+      } finally {
+        restartSpan.end();
       }
     }, delay);
   }
@@ -1246,6 +1471,7 @@ export class ExternalServerManager extends EventEmitter {
       // Emit health check event
       this.emit("healthCheck", {
         serverId,
+        serverName: this.getServerName(serverId),
         health,
         timestamp: new Date(),
       } satisfies ExternalMCPServerEvents["healthCheck"]);
@@ -1365,7 +1591,8 @@ export class ExternalServerManager extends EventEmitter {
   }
 
   /**
-   * Shutdown all servers
+   * Shutdown all servers and clean up resources
+   * This method should be called during application shutdown to prevent memory leaks
    */
   async shutdown(): Promise<void> {
     if (this.isShuttingDown) {
@@ -1387,7 +1614,24 @@ export class ExternalServerManager extends EventEmitter {
     await Promise.all(shutdownPromises);
     this.servers.clear();
 
-    mcpLogger.info("[ExternalServerManager] All servers shut down");
+    // Clean up the tool discovery service to prevent memory leaks
+    // from accumulated event listeners
+    this.toolDiscovery.destroy();
+
+    // Remove all event listeners from this manager
+    this.removeAllListeners();
+
+    mcpLogger.info(
+      "[ExternalServerManager] All servers shut down and resources cleaned up",
+    );
+  }
+
+  /**
+   * Destroy the manager and all associated resources
+   * Alias for shutdown() to match the pattern used by other components
+   */
+  async destroy(): Promise<void> {
+    return this.shutdown();
   }
 
   /**
@@ -1446,7 +1690,7 @@ export class ExternalServerManager extends EventEmitter {
       const discoveryResult = await this.toolDiscovery.discoverTools(
         serverId,
         instance.client,
-        this.config.defaultTimeout,
+        instance.config.timeout || this.config.defaultTimeout,
       );
 
       if (discoveryResult.success) {
@@ -1529,7 +1773,10 @@ export class ExternalServerManager extends EventEmitter {
                   serverId,
                   toolName,
                   params as JsonObject,
-                  { timeout: this.config.defaultTimeout },
+                  {
+                    timeout:
+                      instance.config.timeout || this.config.defaultTimeout,
+                  },
                 );
               },
             }),
@@ -1698,6 +1945,7 @@ export class ExternalServerManager extends EventEmitter {
               );
               throw new Error(
                 `HITL confirmation failed: ${error instanceof Error ? error.message : String(error)}`,
+                { cause: error },
               );
             }
           }
@@ -1715,7 +1963,10 @@ export class ExternalServerManager extends EventEmitter {
         instance.client,
         finalParameters,
         {
-          timeout: options?.timeout || this.config.defaultTimeout,
+          timeout:
+            options?.timeout ||
+            instance.config.timeout ||
+            this.config.defaultTimeout,
         },
       );
 
@@ -1740,12 +1991,32 @@ export class ExternalServerManager extends EventEmitter {
             duration,
           },
         );
+        try {
+          TelemetryService.getInstance()?.recordMCPToolCall(
+            toolName,
+            duration,
+            true,
+          );
+        } catch {
+          /* telemetry should not break execution */
+        }
         return result.data;
       } else {
         throw new Error(result.error || "Tool execution failed");
       }
     } catch (error) {
       instance.metrics.totalErrors++;
+
+      try {
+        const errorDuration = Date.now() - startTime;
+        TelemetryService.getInstance()?.recordMCPToolCall(
+          toolName,
+          errorDuration,
+          false,
+        );
+      } catch {
+        /* telemetry should not break execution */
+      }
 
       mcpLogger.error(
         `[ExternalServerManager] Tool execution failed: ${toolName} on ${serverId}`,

@@ -5,11 +5,9 @@ import inquirer from "inquirer";
 import fs from "fs";
 import path from "path";
 import { logger } from "../../lib/utils/logger.js";
-
-interface SetupMistralArgs {
-  check?: boolean;
-  "non-interactive"?: boolean;
-}
+import { getTopModelChoices } from "../../lib/utils/modelChoices.js";
+import { AIProviderName } from "../../lib/types/index.js";
+import type { SetupMistralArgs } from "../../lib/types/index.js";
 
 /**
  * Validates Mistral API key format
@@ -185,40 +183,10 @@ export const handleMistralSetup = async (
     // Step 2: Model Selection
     const { modelChoice } = await inquirer.prompt([
       {
-        type: "list",
+        type: "select",
         name: "modelChoice",
         message: "Select a Mistral model:",
-        choices: [
-          {
-            name: "mistral-small (Balanced performance - Recommended)",
-            value: "mistral-small",
-          },
-          {
-            name: "mistral-tiny (Fastest, most cost-effective)",
-            value: "mistral-tiny",
-          },
-          {
-            name: "mistral-medium (Enhanced capabilities)",
-            value: "mistral-medium",
-          },
-          {
-            name: "mistral-large (Most capable model)",
-            value: "mistral-large",
-          },
-          {
-            name: "open-mistral-7b (Open source model)",
-            value: "open-mistral-7b",
-          },
-          {
-            name: "open-mixtral-8x7b (Open source mixture of experts)",
-            value: "open-mixtral-8x7b",
-          },
-          {
-            name: "Custom model name",
-            value: "custom",
-          },
-        ],
-        default: "mistral-small",
+        choices: getTopModelChoices(AIProviderName.MISTRAL, 5),
       },
     ]);
 

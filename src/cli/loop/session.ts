@@ -1,32 +1,33 @@
-import type { Argv } from "yargs";
 import chalk from "chalk";
 import readline from "readline";
-import { logger } from "../../lib/utils/logger.js";
+import type { Argv } from "yargs";
+import { checkContextBudget } from "../../lib/context/budgetChecker.js";
+import { NeuroLink } from "../../lib/neurolink.js";
 import { globalSession } from "../../lib/session/globalSessionState.js";
 import type {
-  ConversationMemoryConfig,
-  ConversationData,
-  NeurolinkOptions,
-} from "../../lib/types/conversation.js";
-import { textGenerationOptionsSchema } from "./optionsSchema.js";
-import type { OptionSchema } from "../../lib/types/cli.js";
-import { handleError } from "../errorHandler.js";
-import { ConversationSelector } from "./conversationSelector.js";
-import { NeuroLink } from "../../lib/neurolink.js";
-import type {
-  SessionRestoreResult,
+  OptionSchema,
   RestorationToolContext,
-} from "../../lib/types/cli.js";
+  SessionRestoreResult,
+  ConversationData,
+  ConversationMemoryConfig,
+  NeurolinkOptions,
+} from "../../lib/types/index.js";
+import { logger } from "../../lib/utils/logger.js";
 import {
+  displayConversationPreview,
   displaySessionMessage,
-  verifyConversationContext,
   getConversationPreview,
   loadCommandHistory,
-  saveCommandToHistory,
-  displayConversationPreview,
   parseValue,
   restoreSessionVariables,
+  saveCommandToHistory,
+  verifyConversationContext,
 } from "../../lib/utils/loopUtils.js";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { tracers } from "../../lib/telemetry/tracers.js";
+import { handleError } from "../errorHandler.js";
+import { ConversationSelector } from "./conversationSelector.js";
+import { textGenerationOptionsSchema } from "./optionsSchema.js";
 
 // Banner Art
 const NEUROLINK_BANNER = `
@@ -164,19 +165,45 @@ export class LoopSession {
           processedCommand = ["stream", command];
         }
 
-        // Execute the command
+        // Execute the command within an OTel span for per-turn visibility.
         // The .fail() handler in cli.ts is now session-aware and will
         // handle all parsing and validation errors without exiting the loop.
         // We create a fresh instance for each command to prevent state pollution.
-        const yargsInstance = this.initializeCliParser();
-        await yargsInstance
-          .scriptName("")
-          .fail((msg, err) => {
-            // Re-throw the error to be caught by the outer catch block
-            throw err || new Error(msg);
-          })
-          .exitProcess(false)
-          .parse(processedCommand);
+        await tracers.sdk.startActiveSpan(
+          "neurolink.cli.turn",
+          async (turnSpan) => {
+            try {
+              turnSpan.setAttribute(
+                "cli.command",
+                typeof processedCommand === "string"
+                  ? processedCommand.slice(0, 100)
+                  : (processedCommand[0] ?? "unknown"),
+              );
+              turnSpan.setAttribute("cli.session_id", this.sessionId ?? "none");
+              const yargsInstance = this.initializeCliParser();
+              await yargsInstance
+                .scriptName("")
+                .fail((msg, err) => {
+                  throw err || new Error(msg);
+                })
+                .exitProcess(false)
+                .parse(processedCommand);
+            } catch (e) {
+              const err = e instanceof Error ? e : new Error(String(e));
+              turnSpan.recordException(err);
+              turnSpan.setStatus({
+                code: SpanStatusCode.ERROR,
+                message: err.message,
+              });
+              throw e;
+            } finally {
+              turnSpan.end();
+            }
+          },
+        );
+
+        // Check context budget after each generation command
+        await this.checkContextBudgetWarning();
       } catch (error) {
         // Handle command execution errors gracefully
         handleError(error as Error, "Command execution failed");
@@ -287,6 +314,65 @@ export class LoopSession {
       this.sessionId = globalSession.setLoopSession(
         this.conversationMemoryConfig,
       );
+    }
+  }
+
+  /**
+   * Check context budget and warn if approaching limits.
+   */
+  private async checkContextBudgetWarning(): Promise<void> {
+    const compactionConfig = this.conversationMemoryConfig?.contextCompaction;
+    if (!compactionConfig?.enabled) {
+      return;
+    }
+    try {
+      const provider =
+        (globalSession.getSessionVariable("provider") as string) || "openai";
+      const model = globalSession.getSessionVariable("model") as
+        | string
+        | undefined;
+      const neurolinkInstance = globalSession.getOrCreateNeuroLink();
+      if (!neurolinkInstance?.conversationMemory || !this.sessionId) {
+        return;
+      }
+      const messages =
+        await neurolinkInstance.conversationMemory.buildContextMessages(
+          this.sessionId,
+        );
+      if (!messages || messages.length === 0) {
+        return;
+      }
+      const budgetResult = checkContextBudget({
+        provider,
+        model,
+        conversationMessages: messages.map(
+          (m: { role: string; content: string }) => ({
+            role: m.role,
+            content: m.content,
+          }),
+        ),
+      });
+      const usagePercent = budgetResult.usageRatio * 100;
+      if (budgetResult.shouldCompact) {
+        logger.always(
+          chalk.yellow(
+            `\n  Context usage: ${usagePercent.toFixed(0)}% of window (${budgetResult.estimatedInputTokens.toLocaleString()} / ${budgetResult.availableInputTokens.toLocaleString()} tokens)`,
+          ),
+        );
+        logger.always(
+          chalk.yellow(
+            `  Auto-compaction will trigger to preserve conversation quality.\n`,
+          ),
+        );
+      } else if (usagePercent > 60) {
+        logger.always(
+          chalk.gray(`  Context: ${usagePercent.toFixed(0)}% used`),
+        );
+      }
+    } catch (error) {
+      logger.debug("Context budget check failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

@@ -3,9 +3,14 @@
  * Centralizes repeated object transformation patterns to improve code reuse and maintainability
  */
 
-import type { UnknownRecord } from "../types/common.js";
-import type { StandardRecord, StringArray } from "../types/typeAliases.js";
+import type {
+  UnknownRecord,
+  StandardRecord,
+  StringArray,
+} from "../types/index.js";
+
 import { logger } from "./logger.js";
+import { inlineJsonSchema } from "./schemaConversion.js";
 
 // ============================================================================
 // TOOL EXECUTION TRANSFORMATIONS
@@ -373,40 +378,33 @@ export function transformAvailableTools(
     const fallbackSchema = toolRecord.schema as StandardRecord;
 
     if (inputSchema && typeof inputSchema === "object") {
-      if (inputSchema.$ref && inputSchema.definitions) {
-        const definitions = inputSchema.definitions as StandardRecord;
-        const refValue = inputSchema.$ref;
+      // Use shared inlineJsonSchema for recursive $ref resolution
+      const inlinedSchema = inlineJsonSchema(
+        inputSchema as Record<string, unknown>,
+      ) as StandardRecord;
 
-        if (typeof refValue === "string") {
-          const refKey = refValue.replace("#/definitions/", "");
-
-          if (definitions[refKey] && typeof definitions[refKey] === "object") {
-            const resolvedSchema = definitions[refKey] as StandardRecord;
-
-            extractedParameters = {
-              type: resolvedSchema.type || "object",
-              properties: resolvedSchema.properties || {},
-              required: resolvedSchema.required || [],
-              ...resolvedSchema, // Include all schema metadata
-            };
-          }
-        }
-      } else if (inputSchema.properties) {
+      if (inlinedSchema.properties) {
         extractedParameters = {
-          type: inputSchema.type || "object",
-          properties: inputSchema.properties,
-          required: inputSchema.required || [],
-          ...inputSchema,
+          type: inlinedSchema.type || "object",
+          properties: inlinedSchema.properties,
+          required: inlinedSchema.required || [],
+          ...inlinedSchema,
         };
-      } else if (inputSchema.type === "object") {
-        extractedParameters = inputSchema;
+      } else if (inlinedSchema.type === "object") {
+        extractedParameters = inlinedSchema;
       } else {
-        extractedParameters = inputSchema;
+        extractedParameters = inlinedSchema;
       }
     } else if (directParameters && typeof directParameters === "object") {
-      extractedParameters = directParameters;
+      // Also inline $ref for direct parameters if present
+      extractedParameters = inlineJsonSchema(
+        directParameters as Record<string, unknown>,
+      ) as StandardRecord;
     } else if (fallbackSchema && typeof fallbackSchema === "object") {
-      extractedParameters = fallbackSchema;
+      // Also inline $ref for fallback schema if present
+      extractedParameters = inlineJsonSchema(
+        fallbackSchema as Record<string, unknown>,
+      ) as StandardRecord;
     }
 
     if (!extractedParameters || typeof extractedParameters !== "object") {

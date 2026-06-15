@@ -1,3 +1,7 @@
+---
+description: Learn NeuroLink through practical examples and step-by-step tutorials for real-world applications.
+---
+
 # Examples & Tutorials
 
 Learn NeuroLink through practical examples and step-by-step tutorials for real-world applications.
@@ -6,33 +10,10 @@ Learn NeuroLink through practical examples and step-by-step tutorials for real-w
 
 This section contains practical implementations, use cases, and tutorials to help you integrate NeuroLink into your projects effectively.
 
-<div class="grid cards" markdown>
-
-- :material-rocket: **[Basic Usage](basic-usage.md)**
-
-  ***
-
-  Fundamental examples for both CLI and SDK usage, covering core functionality and common patterns.
-
-- :material-star: **[Advanced Examples](advanced.md)**
-
-  ***
-
-  Complex implementations showcasing advanced features like custom tools, analytics, and streaming.
-
-- :material-lightbulb: **[Use Cases](use-cases.md)**
-
-  ***
-
-  Real-world scenarios and applications across different industries and project types.
-
-- :material-briefcase: **[Business Applications](business.md)**
-
-  ***
-
-  Enterprise-focused examples for production deployments and business automation.
-
-</div>
+- **[Basic Usage](basic-usage.md)** — Fundamental examples for both CLI and SDK usage, covering core functionality and common patterns.
+- **[Advanced Examples](advanced.md)** — Complex implementations showcasing advanced features like custom tools, analytics, and streaming.
+- **[Use Cases](use-cases.md)** — Real-world scenarios and applications across different industries and project types.
+- **[Business Applications](business.md)** — Enterprise-focused examples for production deployments and business automation.
 
 ## 🚀 Quick Examples
 
@@ -143,14 +124,32 @@ This section contains practical implementations, use cases, and tutorials to hel
       const { message } = await request.json();
       const provider = createBestAIProvider();
 
-      const stream = await provider.stream({
+      const result = await provider.stream({
         input: { text: message },
         timeout: "2m",
       });
 
-      return new Response(stream.toReadableStream(), {
+      // Manually create ReadableStream from AsyncIterable
+      const readable = new ReadableStream({
+        async start(controller) {
+          try {
+            for await (const chunk of result.stream) {
+              if (chunk && typeof chunk === "object" && "content" in chunk) {
+                controller.enqueue(new TextEncoder().encode(chunk.content));
+              }
+            }
+            controller.close();
+          } catch (error) {
+            controller.error(error);
+          }
+        },
+      });
+
+      return new Response(readable, {
         headers: {
-          "Content-Type": "text/plain; charset=utf-8",
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
         },
       });
     };

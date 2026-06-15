@@ -10,14 +10,14 @@ import type {
   SageMakerStreamChunk,
   SageMakerUsage,
   SageMakerConfig,
-} from "../../types/providers.js";
+  StreamingCapability,
+  StreamingParser,
+} from "../../types/index.js";
 import { handleSageMakerError, SageMakerError } from "./errors.js";
 import { logger } from "../../utils/logger.js";
-import {
-  createSageMakerDetector,
-  type StreamingCapability,
-} from "./detection.js";
-import { StreamingParserFactory, type StreamingParser } from "./parsers.js";
+import { estimateTokens } from "../../utils/tokenEstimation.js";
+import { createSageMakerDetector } from "./detection.js";
+import { StreamingParserFactory } from "./parsers.js";
 
 /**
  * Synthetic streaming delay in milliseconds for simulating real-time response
@@ -431,9 +431,8 @@ export function estimateTokenUsage(
   prompt: string,
   completion: string,
 ): SageMakerUsage {
-  // Simple estimation: ~4 characters per token (rough average for English)
-  const promptTokens = Math.ceil(prompt.length / 4);
-  const completionTokens = Math.ceil(completion.length / 4);
+  const promptTokens = estimateTokens(prompt, "sagemaker");
+  const completionTokens = estimateTokens(completion, "sagemaker");
 
   return {
     promptTokens,

@@ -14,11 +14,11 @@ Thank you for your interest in contributing to NeuroLink! We welcome contributio
 - [Documentation](#documentation)
 - [Community](#community)
 
-## 📜 Code of Conduct
+## Code of Conduct
 
-Please read and follow our [Code of Conduct](../CODE_OF_CONDUCT.md). We are committed to providing a welcoming and inclusive environment for all contributors.
+Please read and follow our [Code of Conduct](../code-of-conduct.md). We are committed to providing a welcoming and inclusive environment for all contributors.
 
-## 🚀 How to Contribute
+## How to Contribute
 
 ### Reporting Issues
 
@@ -40,11 +40,11 @@ Please read and follow our [Code of Conduct](../CODE_OF_CONDUCT.md). We are comm
 4. **Write tests** - Ensure your changes are tested
 5. **Submit a pull request** - Follow our PR template
 
-## 🛠️ Development Setup
+## Development Setup
 
 ### Prerequisites
 
-- Node.js 18+ and npm 9+
+- Node.js 18+ and pnpm 9+
 - Git
 - At least one AI provider API key (OpenAI, Google AI, etc.)
 
@@ -56,23 +56,23 @@ git clone https://github.com/YOUR_USERNAME/neurolink.git
 cd neurolink
 
 # Install dependencies
-npm install
+pnpm install
 
 # Set up environment variables
 cp .env.example .env
 # Edit .env with your API keys
 
 # Build the project
-npm run build
+pnpm run build
 
 # Run tests
-npm test
+pnpm test
 
 # Run linting
-npm run lint
+pnpm run lint
 
 # Run type checking
-npm run type-check
+pnpm run check
 ```
 
 ### Running Examples
@@ -82,14 +82,14 @@ npm run type-check
 npx tsx src/cli/index.ts generate "Hello world"
 
 # Run example scripts
-npm run example:basic
-npm run example:streaming
+pnpm run example:basic
+pnpm run example:streaming
 
 # Start demo server
-cd neurolink-demo && npm start
+cd neurolink-demo && pnpm start
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 neurolink/
@@ -114,20 +114,20 @@ neurolink/
 - **CompatibilityFactory** - Handles provider creation and compatibility
 - **MCP Integration** - Built-in and external tool support
 
-## 💻 Coding Standards
+## Coding Standards
 
 ### TypeScript Style Guide
 
 ```typescript
 // ✅ Good: Clear interfaces with documentation
-interface GenerateOptions {
+type GenerateOptions = {
   /** The input text to process */
   input: { text: string };
   /** Temperature for randomness (0-1) */
   temperature?: number;
   /** Maximum tokens to generate */
   maxTokens?: number;
-}
+};
 
 // ✅ Good: Proper error handling
 async function generate(options: GenerateOptions): Promise<GenerateResult> {
@@ -162,7 +162,7 @@ function process(data: any) {
 - **Functions**: `camelCase` (e.g., `createProvider`)
 - **Constants**: `UPPER_SNAKE_CASE` (e.g., `DEFAULT_TIMEOUT`)
 
-## 🧪 Testing Guidelines
+## Testing Guidelines
 
 ### Test Structure
 
@@ -202,25 +202,25 @@ describe("OpenAIProvider", () => {
 
 ```bash
 # Run all tests
-npm test
+pnpm test
 
 # Run tests in watch mode
-npm run test:watch
+pnpm run test:watch
 
 # Run with coverage
-npm run test:coverage
+pnpm run test:coverage
 
 # Run specific test file
-npm test src/providers/openai.test.ts
+pnpm test:providers
 ```
 
-## 🔄 Pull Request Process
+## Pull Request Process
 
 ### Before Submitting
 
 1. **Update documentation** - Keep docs in sync with code changes
 2. **Add tests** - New features need tests
-3. **Run checks** - `npm run lint && npm run type-check && npm test`
+3. **Run checks** - `pnpm run lint && pnpm run check && pnpm test`
 4. **Update CHANGELOG** - Add your changes under "Unreleased"
 
 ### PR Template
@@ -255,7 +255,7 @@ Fixes #123
 3. **Documentation review** - Docs team review if needed
 4. **Testing** - Manual testing for significant changes
 
-## 📚 Documentation
+## Documentation
 
 ### Documentation Standards
 
@@ -304,13 +304,13 @@ Tips for effective usage.
 Known gotchas and solutions.
 ````
 
-## 🌟 Community
+## Community
 
 ### Getting Help
 
 - **GitHub Discussions** - Ask questions and share ideas
 - **Issues** - Report bugs and request features
-- **Discord** - Join our community chat (coming soon)
+- **Discord** - Community chat is planned for the future
 
 ### Ways to Contribute
 

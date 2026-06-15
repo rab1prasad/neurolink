@@ -1,5 +1,7 @@
 # 🔍 MCP Auto-Discovery System (v1.7.1 Status)
 
+> ⚠️ **PARTIAL IMPLEMENTATION**: Some features in this documentation are planned but not yet implemented. The `discoverMCPServers` function referenced in code examples is not currently exported from `@juspay/neurolink`. CLI-based discovery (`npx neurolink mcp discover`) is functional, but the programmatic API is in development.
+
 ## Overview
 
 The **MCP Auto-Discovery System** is a revolutionary feature in NeuroLink that automatically discovers and catalogs MCP (Model Context Protocol) server configurations from all major AI development tools on your system. This breakthrough eliminates the need for manual configuration and provides instant access to your existing MCP ecosystem.
@@ -69,7 +71,7 @@ Direct external tool execution (in development):
 npx neurolink mcp exec filesystem read_file --params '{"path": "README.md"}'
 ```
 ```javascript
-const { discoverMCPServers } = require('@juspay/neurolink/mcp');
+const { discoverMCPServers } = require('@juspay/neurolink');
 const servers = await discoverMCPServers();
 ```
 
@@ -172,6 +174,46 @@ For a comprehensive guide to all supported tools and their configuration locatio
 - **Generic**: `.mcp-config.json`, `mcp.json` in project root
 
 All configurations use similar JSON structure with `mcpServers` as the primary key.
+
+### Transport Types (NEW - MCP 2025)
+
+NeuroLink supports multiple transport types for MCP server connections:
+
+| Transport | Use Case | Configuration |
+|-----------|----------|---------------|
+| **stdio** | Local MCP servers (npx commands) | `command: "npx ..."` |
+| **sse** | Legacy remote servers | `transport: "sse"`, `url: "http://..."` |
+| **http** | Remote MCP APIs (GitHub Copilot, Enterprise) | `transport: "http"`, `url: "https://..."` |
+
+#### HTTP Transport Configuration
+For remote MCP servers that use HTTP/Streamable HTTP transport:
+
+```json
+{
+  "mcpServers": {
+    "github-copilot": {
+      "name": "github-copilot",
+      "transport": "http",
+      "url": "https://api.githubcopilot.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      },
+      "httpOptions": {
+        "timeout": 15000,
+        "retries": 3
+      }
+    }
+  }
+}
+```
+
+Key features:
+- **Custom Headers**: Authentication via Bearer tokens, API keys
+- **Session Management**: Automatic `Mcp-Session-Id` handling
+- **Retry Logic**: Configurable retry with exponential backoff
+- **Rate Limiting**: Built-in request throttling support
+
+See [MCP HTTP Transport Documentation](../docs/mcp-http-transport.md) for full details.
 
 ### The Resilient JSON Parser
 

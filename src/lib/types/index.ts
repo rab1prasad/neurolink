@@ -1,218 +1,83 @@
 /**
- * Centralized type exports for NeuroLink
+ * Centralized type exports for NeuroLink.
+ * Every type file uses wildcard export. Zero selective exports, zero aliases.
  */
 
-// Common utility types
-export * from "./common.js";
-
-// Constants and enums
-export { AIProviderName } from "../constants/enums.js";
-
-// Type aliases - only export non-duplicate types that are commonly used
-export type {
-  ZodUnknownSchema,
-  ValidationSchema,
-  OptionalValidationSchema,
-  StandardRecord,
-  OptionalStandardRecord,
-} from "./typeAliases.js";
-
-// Tool system types
-export * from "./tools.js";
-
-// Provider types
-export * from "./providers.js";
-
-// CLI types
-export * from "./cli.js";
-
-// Task classification types
-export * from "./taskClassificationTypes.js";
-
-// Configuration types
-export type {
-  NeuroLinkConfig,
-  PerformanceConfig,
-  CacheConfig,
-  FallbackConfig,
-  RetryConfig,
-  AnalyticsConfig,
-  ToolConfig,
-  BackupInfo,
-  BackupMetadata,
-  ConfigValidationResult,
-  ConfigUpdateOptions,
-} from "./configTypes.js";
-
-// Re-export commonly used types for convenience
-export type {
-  Unknown,
-  UnknownRecord,
-  UnknownArray,
-  JsonValue,
-  JsonObject,
-  JsonArray,
-  ErrorInfo,
-  Result,
-  FunctionParameters,
-} from "./common.js";
-
-export type {
-  ToolArgs,
-  ToolContext,
-  ToolResult,
-  ToolDefinition,
-  SimpleTool,
-  AvailableTool,
-  ToolInfo,
-  ToolExecution,
-  ToolExecutionResult,
-  ValidationResult,
-  ExecutionContext,
-  CacheOptions,
-  FallbackOptions,
-} from "./tools.js";
-
-export type {
-  AISDKModel,
-  ProviderError,
-  AIModelProviderConfig,
-} from "./providers.js";
-
-export type {
-  BaseCommandArgs,
-  GenerateCommandArgs,
-  MCPCommandArgs,
-  ModelsCommandArgs,
-  CommandResult,
-  GenerateResult,
-  StreamChunk,
-} from "./cli.js";
-
-export type {
-  TaskType,
-  TaskClassification,
-  ClassificationScores,
-  ClassificationStats,
-  ClassificationValidation,
-} from "./taskClassificationTypes.js";
-
-// MCP domain types
-export type {
-  MCPTransportType,
-  MCPServerConnectionStatus,
-  MCPServerCategory,
-  MCPServerStatus,
-  MCPDiscoveredServer,
-  MCPConnectedServer,
-  MCPToolInfo,
-  MCPExecutableTool,
-  MCPServerMetadata,
-  MCPToolMetadata,
-  MCPServerRegistryEntry,
-  // Additional MCP types (moved from individual MCP files)
-  NeuroLinkMCPTool,
-  NeuroLinkMCPServer,
-  NeuroLinkExecutionContext,
-  MCPServerConfig,
-  DiscoveredMcp,
-  McpMetadata,
-  ToolDiscoveryResult,
-  ExternalToolExecutionOptions,
-  ToolValidationResult,
-  ToolRegistryEvents,
-  CircuitBreakerState,
-  CircuitBreakerConfig,
-  CircuitBreakerStats,
-  CircuitBreakerEvents,
-  McpRegistry,
-  MCPClientResult,
-  FlexibleValidationResult,
-} from "./mcpTypes.js";
-
-// External MCP types
-export type {
-  ExternalMCPServerInstance,
-  ExternalMCPServerStatus,
-  ExternalMCPToolInfo,
-  ExternalMCPServerHealth,
-  ExternalMCPConfigValidation,
-  ExternalMCPOperationResult,
-  ExternalMCPToolContext,
-  ExternalMCPToolResult,
-  ExternalMCPServerEvents,
-  ExternalMCPManagerConfig,
-} from "./externalMcp.js";
-
-// Model/Provider domain types
-export type {
-  ModelCapability,
-  ModelUseCase,
-  ModelFilter,
-  ModelResolutionContext,
-  ModelStats,
-  ModelPricing,
-} from "./providers.js";
-
-// Stream/Tool domain types are exported via wildcard from ./streamTypes.js
-
-// Domain factory types
-export type {
-  DomainType,
-  DomainConfig,
-  DomainTemplate,
-  DomainConfigOptions,
-  DomainEvaluationCriteria,
-  DomainValidationRule,
-} from "./domainTypes.js";
-
-// Generate types - NEW
-export * from "./generateTypes.js";
-
-// Stream types - NEW (selective export to avoid conflicts)
-export type {
-  StreamingProgressData,
-  StreamingMetadata,
-  ProgressCallback,
-  ToolCall as StreamToolCall, // Renamed to avoid conflict with tools.js ToolCall
-  ToolResult as StreamToolResult, // Renamed to avoid conflict with tools.js ToolResult
-  ToolCallResults,
-  ToolCalls,
-  StreamOptions,
-  StreamingOptions,
-  StreamResult,
-  EnhancedStreamProvider,
-} from "./streamTypes.js";
-
-// Analytics types - NEW
+// All type files (alphabetical)
+export * from "./enums.js";
+export * from "./action.js";
+export * from "./aliases.js";
 export * from "./analytics.js";
-
-// Evaluation types - NEW
+export * from "./artifact.js";
+export * from "./auth.js";
+export * from "./autoresearch.js";
+export * from "./circuitBreakerErrors.js";
+export * from "./cli.js";
+export * from "./client.js";
+export * from "./common.js";
+export * from "./config.js";
+export * from "./context.js";
+export * from "./conversation.js";
+export * from "./conversationMemoryInterface.js";
+export * from "./domain.js";
+export * from "./errors.js";
 export * from "./evaluation.js";
-
-// Model types - NEW
-export * from "./modelTypes.js";
-
-// Service types - NEW
-export * from "./serviceTypes.js";
-
-// Evaluation provider types - NEW
 export * from "./evaluationProviders.js";
-
-// SDK Types - Core types for external developers
-export * from "./sdkTypes.js";
-
-// Utilities Types - Utility module types (selective export to avoid conflicts)
+export * from "./externalMcp.js";
+export * from "./file.js";
+export * from "./fileReference.js";
+export * from "./generate.js";
+export * from "./grounding.js";
+export * from "./guardrails.js";
+export * from "./hitl.js";
+export * from "./livekit.js";
+export * from "./mcp.js";
+export * from "./mcpOutput.js";
+export * from "./memory.js";
+export * from "./middleware.js";
+export * from "./model.js";
+export * from "./multimodal.js";
+export * from "./observability.js";
+export * from "./openaiCompatible.js";
+export * from "./ppt.js";
+export * from "./processor.js";
+export * from "./providers.js";
+export * from "./proxy.js";
+export * from "./rag.js";
+export * from "./scorer.js";
+export * from "./sdk.js";
+export * from "./server.js";
+export * from "./service.js";
+export * from "./stream.js";
+export * from "./subscription.js";
+export * from "./task.js";
+export * from "./taskClassification.js";
+export * from "./tools.js";
+export * from "./voice.js";
+export * from "./universalProviderOptions.js";
 export * from "./utilities.js";
+export * from "./workflow.js";
 
-// Middleware Types - Middleware system types
-export * from "./middlewareTypes.js";
+// Processor base types are re-exported via ./processor.js
+export * from "./exporter.js";
+export * from "./span.js";
+export * from "./imageGen.js";
+export * from "./elicitation.js";
 
-// File detection and processing types
-export * from "./fileTypes.js";
+// Dynamic Arguments types
+export * from "./dynamic.js";
 
-// Content types for multimodal support
-export * from "./content.js";
+// Curator P2-4 dedup: per-stream AsyncLocalStorage context
+export * from "./streamDedup.js";
 
-// TTS (Text-to-Speech) types
-export * from "./ttsTypes.js";
+// Curator P3-6: NoOutputGeneratedError sentinel chunk shape
+export * from "./noOutputSentinel.js";
+
+// New modality categories (M9.1+)
+export * from "./video.js";
+export * from "./avatar.js";
+export * from "./music.js";
+export * from "./replicate.js";
+
+// Safe-fetch helper types (SSRF-hardened download)
+export * from "./safeFetch.js";

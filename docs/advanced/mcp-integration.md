@@ -1,19 +1,5 @@
 # 🔧 MCP (Model Context Protocol) Integration Guide
 
-## ✅ IMPLEMENTATION STATUS: COMPLETE (2025-01-07)
-
-**Generate Function Migration completed - MCP integration enhanced with factory patterns**
-
-- ✅ MCP tools work seamlessly with modern `generate()` method
-- ✅ Factory pattern provides better MCP tool management
-- ✅ Enhanced error handling for MCP server connections
-- ✅ All existing MCP configurations continue working
-
-> **Migration Note**: MCP integration enhanced but remains transparent.
-> Use `generate()` for future-ready MCP workflows.
-
----
-
 **NeuroLink Universal AI Platform with External Server Connectivity**
 
 ---
@@ -90,7 +76,7 @@ import { NeuroLink } from "@juspay/neurolink";
 const neurolink = new NeuroLink();
 
 // Add external servers dynamically
-await neurolink.addMCPServer("bitbucket", {
+await neurolink.addExternalMCPServer("bitbucket", {
   command: "npx",
   args: ["-y", "@nexus2520/bitbucket-mcp-server"],
   env: {
@@ -100,21 +86,30 @@ await neurolink.addMCPServer("bitbucket", {
 });
 
 // Add database integration
-await neurolink.addMCPServer("database", {
+await neurolink.addExternalMCPServer("database", {
   command: "node",
   args: ["./custom-db-server.js"],
   env: { DB_CONNECTION: "postgresql://..." },
 });
 
-// Verify registration
+// Verify registration — getMCPStatus() also triggers MCP initialization,
+// so always call it before listMCPServers() to ensure the subsystem is ready.
 const status = await neurolink.getMCPStatus();
 console.log("Active servers:", status.totalServers);
+
+const servers = await neurolink.listMCPServers();
+console.log(
+  "Registered servers:",
+  servers.map((s) => s.name),
+);
 ```
 
-### **4. Execute Tools (Coming Soon)**
+### **4. Execute Tools (Planned)**
 
-```bash
-# Execute tools from connected servers
+> This feature is planned for a future release.
+
+```text
+# Execute tools from connected servers (planned — not yet implemented)
 npx neurolink mcp exec filesystem read_file --params '{"path": "README.md"}'
 npx neurolink mcp exec github create_issue --params '{"title": "New feature", "body": "Description"}'
 ```
@@ -156,8 +151,9 @@ neurolink mcp add <name> <command> [options]
 **Options:**
 
 - `--args` - Command arguments (array)
-- `--transport` - Transport type (stdio|sse)
-- `--url` - URL for SSE transport
+- `--transport` - Transport type (stdio|sse|websocket|http)
+- `--url` - URL for SSE/WebSocket/HTTP transport
+- `--headers` - HTTP headers for authentication (JSON)
 - `--env` - Environment variables (JSON)
 - `--cwd` - Working directory
 
@@ -169,6 +165,9 @@ neurolink mcp add myserver "python /path/to/server.py" --args "arg1,arg2"
 
 # Add SSE server
 neurolink mcp add webserver "http://localhost:8080" --transport sse --url "http://localhost:8080/mcp"
+
+# Add HTTP remote server with authentication
+neurolink mcp add remote-api "https://api.example.com/mcp" --transport http --url "https://api.example.com/mcp" --headers '{"Authorization": "Bearer YOUR_TOKEN"}'
 
 # Add server with environment variables
 neurolink mcp add dbserver "npx db-mcp-server" --env '{"DB_URL": "postgresql://..."}'
@@ -232,9 +231,9 @@ neurolink mcp remove <server>
 
 ## ⚙️ **Configuration**
 
-### **External Server Configuration** [Coming Soon]
+### **External Server Configuration**
 
-External MCP servers will be configured in `.mcp-config.json`:
+External MCP servers are configured in `.mcp-config.json`:
 
 ```json
 {
@@ -366,6 +365,60 @@ For web-based servers:
 neurolink mcp add web-server "http://localhost:8080" --transport sse --url "http://localhost:8080/sse"
 ```
 
+#### **HTTP Transport (Streamable HTTP)**
+
+For remote MCP servers with authentication, retry, and rate limiting:
+
+```bash
+neurolink mcp add remote-api "https://api.example.com/mcp" \
+  --transport http \
+  --url "https://api.example.com/mcp" \
+  --headers '{"Authorization": "Bearer YOUR_TOKEN"}'
+```
+
+**Configuration in `.mcp-config.json`:**
+
+```json
+{
+  "mcpServers": {
+    "remote-api": {
+      "transport": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      },
+      "httpOptions": {
+        "connectionTimeout": 30000,
+        "requestTimeout": 60000,
+        "idleTimeout": 120000,
+        "keepAliveTimeout": 30000
+      },
+      "retryConfig": {
+        "maxAttempts": 3,
+        "initialDelay": 1000,
+        "maxDelay": 30000,
+        "backoffMultiplier": 2
+      },
+      "rateLimiting": {
+        "requestsPerMinute": 60,
+        "maxBurst": 10,
+        "useTokenBucket": true
+      }
+    }
+  }
+}
+```
+
+**HTTP Transport Features:**
+
+- Custom headers for authentication (Bearer, API Key)
+- Configurable connection and request timeouts
+- Automatic retry with exponential backoff
+- Rate limiting with token bucket algorithm
+- OAuth 2.1 support with PKCE
+
+See [MCP HTTP Transport Guide](../mcp-http-transport.md) for complete documentation.
+
 ### **Server Environment Configuration**
 
 Pass environment variables to servers:
@@ -381,6 +434,42 @@ Set server working directory:
 ```bash
 neurolink mcp add project-server "python local-server.py" --cwd "/path/to/project"
 ```
+
+---
+
+## 🚀 Advanced MCP Features
+
+NeuroLink provides advanced MCP capabilities for production environments with multiple servers and complex tool ecosystems.
+
+### Tool Router
+
+Intelligent tool call routing for multi-server environments with round-robin, least-loaded, capability-based, and session affinity strategies.
+
+### Tool Cache
+
+Cache tool results with configurable LRU, FIFO, or LFU eviction strategies, pattern-based invalidation, and cache statistics.
+
+### Request Batcher
+
+Batch multiple tool calls for efficient execution with automatic batch sizing and server-grouped batching.
+
+### Tool Annotations
+
+Add safety metadata to tools (readOnly, destructive, idempotent) with automatic safety level inference and annotation-based filtering.
+
+### Custom MCP Servers
+
+Create custom MCP servers using the `MCPServerBase` abstract class with built-in tool registration, event emission, and lifecycle management.
+
+### Elicitation Protocol
+
+Interactive tool input during execution supporting text, select, multi-select, confirmation, file upload, and form elicitation types.
+
+### Multi-Server Manager
+
+Load balancing and coordination across multiple MCP servers with server groups and a unified tool interface.
+
+> **Full Documentation**: See the [MCP Enhancements Guide](../features/mcp-enhancements.md) for complete API reference, configuration options, and usage examples.
 
 ---
 
@@ -488,9 +577,9 @@ neurolink workflow "
 
 ### **NeuroLink MCP Resources**
 
-- [MCP Testing Guide](MCP-TESTING-GUIDE.md)
+- [MCP Testing Guide](mcp-testing-guide.md)
 - [CLI Command Reference](../cli/commands.md#mcp)
-- [API Integration](API-REFERENCE.md#mcp-integration)
+- [API Integration](../sdk/api-reference.md)
 
 ### **Community Servers**
 
@@ -500,14 +589,6 @@ neurolink workflow "
 ---
 
 ## 🚀 **What's Next?**
-
-### **Coming Soon**
-
-- ✅ **Tool Execution** - Direct tool invocation from CLI
-- ✅ **Workflow Orchestration** - Multi-step tool workflows
-- ✅ **AI Integration** - Tools accessible during AI generation
-- ✅ **Performance Optimization** - Parallel tool execution
-- ✅ **Advanced Security** - Fine-grained permissions
 
 ### **Get Involved**
 

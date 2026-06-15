@@ -52,3 +52,19 @@ pnpm-lock.yaml
 *.d.ts
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+action-dist/
+chunks.json
+test-reports/
+
+# Docusaurus build output and docs (formatted by docs-site workspace)
+docs-site/.docusaurus/
+docs-site/docs/
+
+# Svelte files require prettier-plugin-svelte (handled by landing workspace)
+landing/**/*.svelte
+
+# Recovered/temporary documentation
+recovered-docs/
+
+# Temporary investigation artifacts
+fix/

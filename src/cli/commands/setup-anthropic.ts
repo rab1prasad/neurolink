@@ -16,28 +16,20 @@ import inquirer from "inquirer";
 import chalk from "chalk";
 import ora from "ora";
 import { logger } from "../../lib/utils/logger.js";
-
-interface AnthropicSetupOptions {
-  checkOnly?: boolean;
-  interactive?: boolean;
-}
-
-interface AnthropicSetupArgv {
-  check?: boolean;
-  nonInteractive?: boolean;
-}
-
-interface AnthropicConfig {
-  apiKey?: string;
-  model?: string;
-  isReconfiguring?: boolean;
-}
+import { getTopModelChoices } from "../../lib/utils/modelChoices.js";
+import {
+  AIProviderName,
+  type ProviderSetupArgv,
+  type ProviderSetupConfig,
+  type ProviderSetupOptions,
+} from "../../lib/types/index.js";
+import { maskCredential } from "../utils/maskCredential.js";
 
 export async function handleAnthropicSetup(
-  argv: AnthropicSetupArgv,
+  argv: ProviderSetupArgv,
 ): Promise<void> {
   try {
-    const options: AnthropicSetupOptions = {
+    const options: ProviderSetupOptions = {
       checkOnly: argv.check || false,
       interactive: !argv.nonInteractive,
     };
@@ -70,7 +62,7 @@ export async function handleAnthropicSetup(
       return;
     }
 
-    const config: AnthropicConfig = {};
+    const config: ProviderSetupConfig = {};
 
     // Step 2: Handle existing configuration
     if (hasApiKey) {
@@ -324,35 +316,10 @@ function validateApiKey(input: string): boolean | string {
 async function promptForModel(): Promise<string> {
   const { modelChoice } = await inquirer.prompt([
     {
-      type: "list",
+      type: "select",
       name: "modelChoice",
       message: "Select an Anthropic Claude model:",
-      choices: [
-        {
-          name: "claude-3-5-sonnet-20241022 (Recommended - Latest and most capable)",
-          value: "claude-3-5-sonnet-20241022",
-        },
-        {
-          name: "claude-3-5-haiku-20241022 (Fast and cost-effective)",
-          value: "claude-3-5-haiku-20241022",
-        },
-        {
-          name: "claude-3-opus-20240229 (Most powerful, slower)",
-          value: "claude-3-opus-20240229",
-        },
-        {
-          name: "claude-3-sonnet-20240229 (Balanced performance)",
-          value: "claude-3-sonnet-20240229",
-        },
-        {
-          name: "claude-3-haiku-20240307 (Fast and economical)",
-          value: "claude-3-haiku-20240307",
-        },
-        {
-          name: "Custom model (enter manually)",
-          value: "custom",
-        },
-      ],
+      choices: getTopModelChoices(AIProviderName.ANTHROPIC, 5),
     },
   ]);
 
@@ -384,7 +351,7 @@ async function promptForModel(): Promise<string> {
 /**
  * Update .env file with Anthropic configuration
  */
-async function updateEnvFile(config: AnthropicConfig): Promise<void> {
+async function updateEnvFile(config: ProviderSetupConfig): Promise<void> {
   const envPath = path.join(process.cwd(), ".env");
   const spinner = ora("💾 Updating .env file...").start();
 
@@ -468,22 +435,6 @@ async function updateEnvFile(config: AnthropicConfig): Promise<void> {
     );
     throw error;
   }
-}
-
-/**
- * Mask API key for display
- */
-function maskCredential(credential: string): string {
-  if (!credential || credential.length < 8) {
-    return "****";
-  }
-  const knownPrefixes = ["sk-ant-"];
-  const prefix =
-    knownPrefixes.find((p) => credential.startsWith(p)) ??
-    credential.slice(0, 3);
-  const end = credential.slice(-4);
-  const stars = "*".repeat(Math.max(4, credential.length - prefix.length - 4));
-  return `${prefix}${stars}${end}`;
 }
 
 /**

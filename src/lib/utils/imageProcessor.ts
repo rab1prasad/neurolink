@@ -4,10 +4,11 @@
  */
 
 import { logger } from "./logger.js";
+import { urlDownloadRateLimiter } from "./rateLimiter.js";
 import { withRetry } from "./retryHandler.js";
 import { SYSTEM_LIMITS } from "../core/constants.js";
-import type { ProcessedImage } from "../types/multimodal.js";
-import type { FileProcessingResult } from "../types/fileTypes.js";
+import { getImageCache } from "./imageCache.js";
+import type { ProcessedImage, FileProcessingResult } from "../types/index.js";
 
 /**
  * Network error codes that should trigger a retry
@@ -176,6 +177,7 @@ export class ImageProcessor {
       logger.error("Failed to process image for OpenAI:", error);
       throw new Error(
         `Image processing failed for OpenAI: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { cause: error },
       );
     }
   }
@@ -216,6 +218,7 @@ export class ImageProcessor {
       logger.error("Failed to process image for Google AI:", error);
       throw new Error(
         `Image processing failed for Google AI: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { cause: error },
       );
     }
   }
@@ -256,6 +259,7 @@ export class ImageProcessor {
       logger.error("Failed to process image for Anthropic:", error);
       throw new Error(
         `Image processing failed for Anthropic: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { cause: error },
       );
     }
   }
@@ -283,6 +287,7 @@ export class ImageProcessor {
       logger.error("Failed to process image for Vertex AI:", error);
       throw new Error(
         `Image processing failed for Vertex AI: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { cause: error },
       );
     }
   }
@@ -432,11 +437,67 @@ export class ImageProcessor {
         return { width, height };
       }
 
-      // Basic JPEG dimension extraction (simplified)
+      // JPEG dimension extraction via SOF marker parsing
       if (buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8) {
-        // This is a very basic implementation
-        // For production, consider using a proper image library
-        return null;
+        // Search for SOF0 (0xFFC0) or SOF2 (0xFFC2) markers
+        let offset = 2;
+        while (offset < buffer.length - 1) {
+          // Find next marker (0xFF followed by non-zero, non-0xFF byte)
+          if (buffer[offset] !== 0xff) {
+            offset++;
+            continue;
+          }
+
+          // Skip any padding 0xFF bytes
+          while (offset < buffer.length && buffer[offset] === 0xff) {
+            offset++;
+          }
+
+          if (offset >= buffer.length) {
+            break;
+          }
+
+          const marker = buffer[offset];
+          offset++;
+
+          // Check for SOF0 (0xC0 - baseline DCT) and SOF2 (0xC2 - progressive DCT)
+          // These are the most common JPEG encoding modes
+          if (marker === 0xc0 || marker === 0xc2) {
+            // SOF marker found: length (2 bytes) + precision (1 byte) + height (2 bytes) + width (2 bytes)
+            if (offset + 7 > buffer.length) {
+              break; // Truncated file
+            }
+            const height = buffer.readUInt16BE(offset + 3);
+            const width = buffer.readUInt16BE(offset + 5);
+            return { width, height };
+          }
+
+          // Skip this marker's segment (except for markers without length)
+          if (
+            marker === 0xd0 ||
+            marker === 0xd1 ||
+            marker === 0xd2 ||
+            marker === 0xd3 ||
+            marker === 0xd4 ||
+            marker === 0xd5 ||
+            marker === 0xd6 ||
+            marker === 0xd7 ||
+            marker === 0xd8 ||
+            marker === 0xd9 ||
+            marker === 0x01
+          ) {
+            // RST0-RST7, SOI, EOI, TEM - no length field
+            continue;
+          }
+
+          if (offset + 2 > buffer.length) {
+            break; // Truncated file
+          }
+          const segmentLength = buffer.readUInt16BE(offset);
+          offset += segmentLength;
+        }
+
+        return null; // No SOF marker found
       }
 
       return null;
@@ -518,10 +579,37 @@ export class ImageProcessor {
       logger.error(`Failed to process image for ${provider}:`, error);
       throw new Error(
         `Image processing failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { cause: error },
       );
     }
   }
 }
+
+/**
+ * Whitelist of valid image file extensions (lowercase, no dots).
+ * Used to validate file extensions against a known set of image formats.
+ */
+export const VALID_IMAGE_EXTENSIONS = [
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "webp",
+  "bmp",
+  "tiff",
+  "tif",
+  "svg",
+  "avif",
+  "ico",
+  "heic",
+  "heif",
+];
+
+/**
+ * Set of valid image extensions for O(1) lookup.
+ * @internal
+ */
+const VALID_IMAGE_EXTENSIONS_SET = new Set<string>(VALID_IMAGE_EXTENSIONS);
 
 /**
  * Utility functions for image handling
@@ -556,11 +644,54 @@ export const imageUtils = {
   isBase64: (str: string): boolean => imageUtils.isValidBase64(str),
 
   /**
-   * Extract file extension from filename or URL
+   * Extract file extension from filename or URL.
+   * Strips query strings and fragments before matching so that
+   * "image.jpg?v=1" correctly returns "jpg".
+   * Returns null if no extension is found or if the extension
+   * contains non-alphanumeric characters.
    */
   getFileExtension: (filename: string): string | null => {
-    const match = filename.match(/\.([^.]+)$/);
-    return match ? match[1].toLowerCase() : null;
+    const sanitized = filename.split(/[?#]/)[0];
+    const match = sanitized.match(/\.([^.]+)$/);
+    if (!match) {
+      return null;
+    }
+    const extension = match[1].toLowerCase();
+    if (!/^[a-z0-9]+$/.test(extension)) {
+      return null;
+    }
+    return extension;
+  },
+
+  /**
+   * Validate that an extension is a recognised image format.
+   * Case-insensitive; rejects extensions with special characters.
+   */
+  isValidImageExtension: (extension: string): boolean => {
+    if (!extension || typeof extension !== "string") {
+      return false;
+    }
+    const normalizedExt = extension.toLowerCase();
+    if (!/^[a-z0-9]+$/.test(normalizedExt)) {
+      return false;
+    }
+    return VALID_IMAGE_EXTENSIONS_SET.has(normalizedExt);
+  },
+
+  /**
+   * Extract and validate image file extension from a filename or URL.
+   * Returns null if the extension is missing or not a recognised image format.
+   *
+   * Security note: the last extension is used, so "malware.exe.jpg" returns
+   * "jpg". Callers should apply additional checks (e.g. content inspection)
+   * where double-extension attacks are a concern.
+   */
+  getValidatedImageExtension: (filename: string): string | null => {
+    const extension = imageUtils.getFileExtension(filename);
+    if (!extension) {
+      return null;
+    }
+    return imageUtils.isValidImageExtension(extension) ? extension : null;
   },
 
   /**
@@ -627,6 +758,7 @@ export const imageUtils = {
     } catch (error) {
       throw new Error(
         `Failed to convert file to base64: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { cause: error },
       );
     }
   },
@@ -653,6 +785,8 @@ export const imageUtils = {
    * @param options.maxBytes - Maximum allowed file size (default: 10MB)
    * @param options.maxAttempts - Maximum number of total attempts including initial attempt (default: 3)
    * @returns Promise<string> - Base64 data URI of the downloaded image
+   * Rate-limited to 10 downloads per second to prevent DoS
+   * Uses LRU cache to avoid redundant downloads of the same URL
    */
   urlToBase64DataUri: async (
     url: string,
@@ -666,6 +800,17 @@ export const imageUtils = {
       maxAttempts?: number;
     } = {},
   ): Promise<string> => {
+    // Check cache first
+    const cache = getImageCache();
+    const cached = cache.get(url);
+    if (cached) {
+      logger.debug("Using cached image for URL", { url: url.substring(0, 50) });
+      return cached.dataUri;
+    }
+
+    // Apply rate limiting before download
+    await urlDownloadRateLimiter.acquire();
+
     // Basic protocol whitelist - fail fast, no retry needed
     if (!/^https?:\/\//i.test(url)) {
       throw new Error("Unsupported protocol");
@@ -690,7 +835,13 @@ export const imageUtils = {
           );
         }
 
-        const len = Number(response.headers.get("content-length") || 0);
+        const contentLengthHeader = response.headers.get("content-length");
+        const len = Number(contentLengthHeader || 0);
+
+        if (contentLengthHeader !== null && len === 0) {
+          throw new Error("Empty response: content-length is 0");
+        }
+
         if (len && len > maxBytes) {
           throw new Error(`Content too large: ${len} bytes`);
         }
@@ -702,8 +853,14 @@ export const imageUtils = {
           );
         }
 
-        const base64 = Buffer.from(buffer).toString("base64");
-        return `data:${contentType || "image/jpeg"};base64,${base64}`;
+        const imageBuffer = Buffer.from(buffer);
+        const base64 = imageBuffer.toString("base64");
+        const dataUri = `data:${contentType || "image/jpeg"};base64,${base64}`;
+
+        // Store in cache for future use
+        cache.set(url, dataUri, contentType || "image/jpeg", imageBuffer);
+
+        return dataUri;
       } finally {
         clearTimeout(t);
       }
@@ -728,6 +885,7 @@ export const imageUtils = {
     } catch (error) {
       throw new Error(
         `Failed to download and convert URL to base64: ${error instanceof Error ? error.message : "Unknown error"}`,
+        { cause: error },
       );
     }
   },

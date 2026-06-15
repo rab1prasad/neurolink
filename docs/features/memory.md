@@ -1,0 +1,486 @@
+---
+title: Memory Guide
+description: Per-user condensed memory that persists across conversations using the @juspay/hippocampus SDK
+keywords:
+  [
+    memory,
+    condensed-memory,
+    per-user-memory,
+    conversation-memory,
+    long-term-memory,
+    s3,
+    redis,
+    sqlite,
+    custom-storage,
+  ]
+---
+
+# Memory Guide
+
+> **Since**: v9.12.0 | **Status**: Stable | **Availability**: SDK
+
+## Overview
+
+NeuroLink includes a **memory engine** powered by the `@juspay/hippocampus` SDK. Unlike conversation memory (which tracks recent turns in a session), memory maintains a **condensed summary** of durable facts about each user across all conversations.
+
+Key characteristics:
+
+- **Per-user**: Each user gets an independent memory store keyed by `userId`
+- **Condensed**: Memory is kept to a configurable word limit (default 50 words) via LLM-powered condensation
+- **Persistent**: Stored in S3, Redis, SQLite, or a custom backend — survives server restarts
+- **Non-blocking**: Memory storage happens in the background after each generate/stream call
+- **Crash-safe**: Every SDK method is wrapped in try-catch — errors are logged, never thrown
+
+## How It Works
+
+```
+User prompt arrives
+       │
+       ▼
+ ┌─────────────┐
+ │ memory.get() │ ← Retrieve condensed memory for this userId
+ └──────┬──────┘
+        │ Prepend memory context to prompt
+        ▼
+ ┌─────────────┐
+ │  LLM call   │ ← generate() or stream() as normal
+ └──────┬──────┘
+        │
+        ▼
+ ┌──────────────┐
+ │ memory.add() │ ← In background: condense old memory + new turn via LLM
+ └──────────────┘
+```
+
+On each `generate()` or `stream()` call:
+
+1. **Retrieve**: `memory.get(userId)` fetches the user's condensed memory (if any)
+2. **Inject**: The memory is prepended to the user's prompt as context
+3. **Generate**: The LLM processes the enhanced prompt normally
+4. **Store**: After the response completes, `memory.add(userId, content)` runs in the background. The SDK sends the old memory + new conversation turn to an LLM which produces a new condensed summary
+
+## Quick Start
+
+```typescript
+import { NeuroLink } from "@juspay/neurolink";
+
+const neurolink = new NeuroLink({
+  conversationMemory: {
+    enabled: true,
+    memory: {
+      enabled: true,
+      storage: {
+        type: "s3",
+        bucket: "my-memory-bucket",
+        prefix: "memory/condensed/",
+      },
+      neurolink: {
+        provider: "google-ai",
+        model: "gemini-2.5-flash",
+      },
+      maxWords: 50,
+    },
+  },
+});
+
+// Memory is automatically retrieved and stored on each call
+const result = await neurolink.generate({
+  input: { text: "My name is Alice and I run a Shopify store." },
+  context: { userId: "user-123" },
+});
+
+// Next call — the AI already knows about Alice
+const result2 = await neurolink.generate({
+  input: { text: "What platform do I use?" },
+  context: { userId: "user-123" },
+});
+// → "You use Shopify."
+```
+
+## Configuration
+
+The `memory` field on `conversationMemory` accepts a `Memory` object:
+
+```typescript
+type Memory = HippocampusConfig & { enabled?: boolean };
+```
+
+### Required Fields
+
+| Field                | Type    | Description                                                   |
+| -------------------- | ------- | ------------------------------------------------------------- |
+| `enabled`            | boolean | Set `true` to activate memory                                 |
+| `storage.type`       | string  | Storage backend: `"s3"`, `"redis"`, `"sqlite"`, or `"custom"` |
+| `neurolink.provider` | string  | AI provider for condensation LLM calls                        |
+| `neurolink.model`    | string  | Model for condensation LLM calls                              |
+
+### Optional Fields
+
+| Field              | Type     | Default  | Description                                                                                             |
+| ------------------ | -------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `maxWords`         | number   | 50       | Maximum words in the condensed memory                                                                   |
+| `prompt`           | string   | built-in | Custom condensation prompt (supports `{{OLD_MEMORY}}`, `{{NEW_CONTENT}}`, `{{MAX_WORDS}}` placeholders) |
+| `storage.bucket`   | string   | —        | S3 bucket name (required for S3 storage)                                                                |
+| `storage.prefix`   | string   | —        | S3 key prefix for memory objects                                                                        |
+| `storage.url`      | string   | —        | Redis connection URL (required for Redis storage)                                                       |
+| `storage.path`     | string   | —        | SQLite file path (required for SQLite storage)                                                          |
+| `storage.onGet`    | function | —        | Callback to retrieve memory (required for custom storage)                                               |
+| `storage.onSet`    | function | —        | Callback to persist memory (required for custom storage)                                                |
+| `storage.onDelete` | function | —        | Callback to delete memory (required for custom storage)                                                 |
+| `storage.onClose`  | function | —        | Callback for cleanup on close (optional for custom storage)                                             |
+
+### Storage Backends
+
+#### S3 (Recommended for production)
+
+```typescript
+memory: {
+  enabled: true,
+  storage: {
+    type: "s3",
+    bucket: "my-bucket",
+    prefix: "memory/condensed/",
+  },
+  neurolink: { provider: "google-ai", model: "gemini-2.5-flash" },
+}
+```
+
+Each user's memory is stored as a single S3 object at `{prefix}{userId}`.
+
+#### Redis
+
+```typescript
+memory: {
+  enabled: true,
+  storage: {
+    type: "redis",
+    url: "redis://localhost:6379",
+  },
+  neurolink: { provider: "openai", model: "gpt-4o-mini" },
+}
+```
+
+#### SQLite (Development)
+
+```typescript
+memory: {
+  enabled: true,
+  storage: {
+    type: "sqlite",
+    path: "./memory.db",
+  },
+  neurolink: { provider: "google-ai", model: "gemini-2.5-flash" },
+}
+```
+
+> **Note**: SQLite requires the `better-sqlite3` optional peer dependency. Install it manually: `pnpm add better-sqlite3`
+
+> **Heads up — `@juspay/hippocampus` is now an optional peer.** Starting with this release, NeuroLink no longer pulls `@juspay/hippocampus` as a hard runtime dependency (the package's own peer on `@juspay/neurolink` was dragging the deprecated `@ai-sdk/google` and `@ai-sdk/google-vertex` packages into the production graph). To enable memory in your app, install the SDK explicitly:
+>
+> ```bash
+> pnpm add @juspay/hippocampus
+> # or: npm install @juspay/hippocampus
+> ```
+>
+> If memory is configured but the package is missing, NeuroLink logs a one-time warning and disables memory rather than throwing — generation/streaming continue to work normally.
+
+#### Custom (Consumer-Managed)
+
+Delegates storage to your application via callbacks. Use this when you want to manage persistence yourself — call your own API, write to your own database, or integrate with any external system.
+
+```typescript
+memory: {
+  enabled: true,
+  storage: {
+    type: "custom",
+    onGet: async (ownerId) => {
+      // Retrieve memory from your own storage
+      return await myDB.getMemory(ownerId);
+    },
+    onSet: async (ownerId, memory) => {
+      // Persist the condensed memory
+      await myDB.saveMemory(ownerId, memory);
+    },
+    onDelete: async (ownerId) => {
+      // Delete memory
+      await myDB.deleteMemory(ownerId);
+    },
+  },
+  neurolink: { provider: "google-ai", model: "gemini-2.5-flash" },
+}
+```
+
+The three callbacks (`onGet`, `onSet`, `onDelete`) are required. An optional `onClose` callback can be provided for cleanup when the SDK shuts down.
+
+**Example — file-based storage:**
+
+```typescript
+import { readFile, writeFile, unlink, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+
+const memoryDir = "./data/memory";
+
+memory: {
+  enabled: true,
+  storage: {
+    type: "custom",
+    onGet: async (ownerId) => {
+      try {
+        return await readFile(join(memoryDir, `${ownerId}.txt`), "utf-8");
+      } catch {
+        return null;
+      }
+    },
+    onSet: async (ownerId, memory) => {
+      await mkdir(memoryDir, { recursive: true });
+      await writeFile(join(memoryDir, `${ownerId}.txt`), memory, "utf-8");
+    },
+    onDelete: async (ownerId) => {
+      try { await unlink(join(memoryDir, `${ownerId}.txt`)); } catch { /* ignore */ }
+    },
+  },
+  neurolink: { provider: "google-ai", model: "gemini-2.5-flash" },
+}
+```
+
+## Custom Condensation Prompt
+
+The condensation prompt controls how the LLM merges old memory with new conversation turns. You can provide a custom prompt using the `prompt` field:
+
+```typescript
+memory: {
+  enabled: true,
+  storage: { type: "s3", bucket: "my-bucket" },
+  neurolink: { provider: "google-ai", model: "gemini-2.5-flash" },
+  prompt: `You are a memory engine. Merge the old memory with new facts into a summary of at most {{MAX_WORDS}} words.
+
+OLD_MEMORY:
+{{OLD_MEMORY}}
+
+NEW_CONTENT:
+{{NEW_CONTENT}}
+
+Condensed memory:`,
+  maxWords: 100,
+}
+```
+
+### Placeholders
+
+| Placeholder       | Replaced With                                            |
+| ----------------- | -------------------------------------------------------- |
+| `{{OLD_MEMORY}}`  | The user's existing condensed memory (may be empty)      |
+| `{{NEW_CONTENT}}` | The new conversation turn: `"User: ...\nAssistant: ..."` |
+| `{{MAX_WORDS}}`   | The configured `maxWords` value                          |
+
+## Integration with generate() and stream()
+
+Memory integrates automatically with both `generate()` and `stream()`:
+
+- **Before the LLM call**: Memory is retrieved and prepended to the input text
+- **After the LLM call**: The conversation turn is stored in the background via `setImmediate()`
+- **Timeouts**: Retrieval has a 3-second timeout; storage has a 10-second timeout (includes LLM condensation)
+- **Errors are non-blocking**: If memory retrieval or storage fails, the generate/stream call continues normally
+
+### Requirements
+
+For memory to activate on a call, all three conditions must be met:
+
+1. `memory.enabled` is `true` in the config
+2. `options.context.userId` is provided in the generate/stream call
+3. The response has non-empty content (for write)
+
+### Per-Call Memory Control
+
+When memory is globally enabled, it is active for every `generate()` and `stream()` call by default. You can override this behavior on a **per-call basis** using the `memory` option without changing the global config.
+
+**Available flags:**
+
+| Flag      | Type    | Default | Description                                                        |
+| --------- | ------- | ------- | ------------------------------------------------------------------ |
+| `enabled` | boolean | `true`  | Master toggle — when `false`, both read and write are skipped      |
+| `read`    | boolean | `true`  | Whether to read past memory and prepend it to the prompt           |
+| `write`   | boolean | `true`  | Whether to write this conversation turn into memory after the call |
+
+> **Note:** These flags only take effect when the global memory SDK is enabled. If global memory is disabled, per-call flags have no effect.
+
+**Precedence:**
+
+1. **Global config** — Is memory enabled globally? If not, per-call flags are ignored.
+2. **`enabled`** — Master per-call toggle. If `false`, both read and write are skipped regardless of individual flags.
+3. **`read` / `write`** — Fine-grained control over individual operations.
+
+#### Read memory but don't write
+
+Use when you want past context but don't want this call stored — e.g., code review where you'll store a curated summary later.
+
+```typescript
+const result = await neurolink.generate({
+  input: { text: "Review this pull request for security issues" },
+  memory: { read: true, write: false },
+  context: { userId: "user-123" },
+});
+```
+
+#### Write memory but don't read
+
+Use for onboarding or seeding memory without injecting past context into the prompt.
+
+```typescript
+const result = await neurolink.generate({
+  input: {
+    text: "My name is Alice. I work on the payments team and use Python.",
+  },
+  memory: { read: false, write: true },
+  context: { userId: "user-123" },
+});
+```
+
+#### Skip memory entirely
+
+Use for operational or utility calls where memory adds noise.
+
+```typescript
+const result = await neurolink.generate({
+  input: { text: "Fetch the latest PR comments from GitHub" },
+  memory: { enabled: false },
+  context: { userId: "user-123" },
+});
+```
+
+#### Per-call control with stream()
+
+The same `memory` option works identically in `stream()`.
+
+```typescript
+const stream = await neurolink.stream({
+  input: { text: "Summarize today's standup notes" },
+  memory: { read: true, write: false },
+  context: { userId: "user-123" },
+});
+```
+
+## Multi-User Memory
+
+Retrieve and store memory for multiple users in a single `generate()` or `stream()` call. This enables **layered memory** — combining a user's personal context with org-level policies, team context, or any other memory scope.
+
+The primary user is always determined by `context.userId`. Additional users are specified via `memory.additionalUsers`. Memory for all users (primary + additional) is fetched and stored in parallel.
+
+### Quick Start
+
+```typescript
+const result = await neurolink.stream({
+  input: { text: "How should I handle PCI data in our API?" },
+  context: { userId: "user-alice" },
+  memory: {
+    additionalUsers: [
+      {
+        userId: "org-acme",
+        label: "Organization Policy",
+        prompt: `Extract only compliance requirements, security policies, and org-level decisions.
+
+OLD_MEMORY:
+{{OLD_MEMORY}}
+
+NEW_CONTENT:
+{{NEW_CONTENT}}
+
+Condensed memory (max {{MAX_WORDS}} words):`,
+        maxWords: 100,
+      },
+      {
+        userId: "team-payments",
+        label: "Team Context",
+      },
+    ],
+  },
+});
+```
+
+### Context Format
+
+When multiple users' memories are retrieved, they are formatted with labels and injected into the prompt:
+
+```
+Context from previous conversations:
+
+[User]
+Alice is a senior engineer on the payments team, prefers Python.
+
+[Organization Policy]
+PCI-DSS Level 1 compliance required. All cardholder data must be encrypted at rest and in transit.
+
+[Team Context]
+Payments team uses microservices architecture with Stripe integration.
+
+Current user's request: How should I handle PCI data in our API?
+```
+
+The primary user's label is always `"User"`. Additional users use the `label` field, falling back to `userId` if not set.
+
+### Per-User Condensation
+
+Each additional user can specify a custom `prompt` and `maxWords` for its condensation strategy. This is useful when different memory scopes need different extraction rules — e.g. personal preferences vs compliance policies.
+
+The `prompt` must include `{{OLD_MEMORY}}`, `{{NEW_CONTENT}}`, and `{{MAX_WORDS}}` placeholders. See [Custom Condensation Prompt](#custom-condensation-prompt) for details.
+
+### Selective Read/Write
+
+Control which additional users participate in read and write independently:
+
+```typescript
+memory: {
+  additionalUsers: [
+    { userId: "org-acme", label: "Org Policy", write: false },  // read-only
+    { userId: "team-x", label: "Team", read: false },           // write-only
+  ],
+}
+```
+
+### AdditionalMemoryUser Options
+
+| Field      | Type    | Default  | Description                                           |
+| ---------- | ------- | -------- | ----------------------------------------------------- |
+| `userId`   | string  | required | The owner ID to retrieve/store memory for             |
+| `label`    | string  | userId   | Label used in the formatted memory context            |
+| `read`     | boolean | `true`   | Whether to read this user's memory                    |
+| `write`    | boolean | `true`   | Whether to write conversation into this user's memory |
+| `prompt`   | string  | default  | Custom condensation prompt for this user              |
+| `maxWords` | number  | default  | Max words for this user's condensed memory            |
+
+## Environment Variables
+
+The `@juspay/hippocampus` SDK reads these environment variables:
+
+| Variable                 | Default  | Description                                                 |
+| ------------------------ | -------- | ----------------------------------------------------------- |
+| `HC_LOG_LEVEL`           | `warn`   | SDK log level: `debug`, `info`, `warn`, `error`             |
+| `HC_CONDENSATION_PROMPT` | built-in | Default condensation prompt (overridden by config `prompt`) |
+
+## Error Handling
+
+The memory SDK is designed to **never crash the host application**:
+
+- Every public method (`get()`, `add()`, `delete()`, `close()`) is wrapped in try-catch
+- Errors are logged via `logger.warn()` and safe defaults are returned
+- `get()` returns `null` on error
+- `add()` silently fails on error
+- Storage initialization errors result in memory being disabled (returns `null` from `ensureMemoryReady()`)
+
+## Type Exports
+
+NeuroLink re-exports the memory types for use in host applications:
+
+```typescript
+import type { Memory, CustomStorageConfig } from "@juspay/neurolink";
+
+// Memory = HippocampusConfig & { enabled?: boolean }
+// CustomStorageConfig = { type: 'custom', onGet, onSet, onDelete, onClose? }
+```
+
+## See Also
+
+- **[Conversation Memory](../conversation-memory.md)** - Session-based conversation history
+- **[Memory Integration](../advanced/memory-integration.md)** - Advanced hippocampus configuration and patterns
+- **[Context Compaction](context-compaction.md)** - Automatic context window management
+- **[Context Summarization](../context-summarization.md)** - Conversation compression

@@ -22,31 +22,10 @@ import { handleBedrockSetup } from "./setup-bedrock.js";
 import { handleGCPSetup } from "./setup-gcp.js";
 import { handleHuggingFaceSetup } from "./setup-huggingface.js";
 import { handleMistralSetup } from "./setup-mistral.js";
-
-interface SetupArgs {
-  provider?: string;
-  list?: boolean;
-  status?: boolean;
-  interactive?: boolean;
-  help?: boolean;
-}
-
-interface ProviderInfo {
-  id: string;
-  name: string;
-  emoji: string;
-  description: string;
-  setupTime: string;
-  cost: string;
-  bestFor: string;
-  models: string;
-  strengths: string;
-  pricing: string;
-  setupCommand: string;
-}
+import type { SetupArgs, SetupProviderInfo } from "../../lib/types/index.js";
 
 // Provider information database
-const PROVIDERS: ProviderInfo[] = [
+const PROVIDERS: SetupProviderInfo[] = [
   {
     id: "google-ai",
     name: "Google AI Studio",
@@ -150,6 +129,19 @@ const PROVIDERS: ProviderInfo[] = [
     strengths: "European privacy, efficient models, free tier",
     pricing: "Free tier → €7 per 1M tokens",
     setupCommand: "neurolink setup --provider mistral",
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    emoji: "🔀",
+    description: "100+ models, unified API access",
+    setupTime: "2 min",
+    cost: "Pay-per-use",
+    bestFor: "Model variety",
+    models: "GPT-4, Claude, Gemini, Llama, Mixtral, etc.",
+    strengths: "Access 100+ models via single API, model routing, fallbacks",
+    pricing: "Per-model pricing, free tier available",
+    setupCommand: "neurolink setup --provider openrouter",
   },
 ];
 
@@ -268,7 +260,7 @@ async function runSetupWizard(): Promise<void> {
   // Main menu
   const { action } = await inquirer.prompt([
     {
-      type: "list",
+      type: "select",
       name: "action",
       message: "What would you like to do?",
       choices: [
@@ -350,6 +342,9 @@ async function checkExistingConfigurations(): Promise<string[]> {
   if (process.env.MISTRAL_API_KEY) {
     configured.push("mistral");
   }
+  if (process.env.OPENROUTER_API_KEY) {
+    configured.push("openrouter");
+  }
 
   return configured;
 }
@@ -425,11 +420,12 @@ async function runProviderSelection(): Promise<void> {
   logger.always(chalk.blue("🎯 Perfect! Let's get you connected."));
   logger.always("");
 
-  const choices: Array<{ name: string; value: string } | inquirer.Separator> =
-    PROVIDERS.map((provider) => ({
-      name: `${provider.emoji} ${provider.name.padEnd(18)} - ${provider.description}`,
-      value: provider.id,
-    }));
+  const choices: Array<
+    { name: string; value: string } | InstanceType<typeof inquirer.Separator>
+  > = PROVIDERS.map((provider) => ({
+    name: `${provider.emoji} ${provider.name.padEnd(18)} - ${provider.description}`,
+    value: provider.id,
+  }));
 
   // Add a non-selectable separator row
   choices.push(new inquirer.Separator("─".repeat(60)));
@@ -442,7 +438,7 @@ async function runProviderSelection(): Promise<void> {
 
   const { selectedProvider } = await inquirer.prompt([
     {
-      type: "list",
+      type: "select",
       name: "selectedProvider",
       message: "Which AI provider would you like to configure?",
       choices,
@@ -495,12 +491,55 @@ async function delegateToProviderSetup(providerId: string): Promise<void> {
     case "mistral":
       await handleMistralSetup(setupArgs);
       break;
+    case "openrouter":
+      await handleOpenRouterSetup();
+      break;
     default:
       throw new Error(`Unknown provider: ${providerId}`);
   }
 
   // After successful setup, show completion message
   await showSetupCompletion(providerId);
+}
+
+/**
+ * Handle OpenRouter provider setup
+ */
+async function handleOpenRouterSetup(): Promise<void> {
+  logger.always("");
+  logger.always(chalk.blue("🔀 OpenRouter Setup"));
+  logger.always("");
+  logger.always(
+    "OpenRouter provides unified access to 100+ AI models from multiple providers",
+  );
+  logger.always(
+    "including OpenAI, Anthropic, Google, Meta, Mistral, and more.",
+  );
+  logger.always("");
+  logger.always(chalk.yellow("Step 1: Get your API key"));
+  logger.always("  1. Go to https://openrouter.ai/keys");
+  logger.always("  2. Sign in or create an account");
+  logger.always("  3. Create a new API key");
+  logger.always("");
+  logger.always(chalk.yellow("Step 2: Set the environment variable"));
+  logger.always("  Add to your shell profile (~/.bashrc, ~/.zshrc, etc.):");
+  logger.always("");
+  logger.always(chalk.cyan("  export OPENROUTER_API_KEY=your_api_key_here"));
+  logger.always("");
+  logger.always(chalk.yellow("Step 3: Test the configuration"));
+  logger.always(
+    chalk.cyan(
+      '  neurolink generate "Hello!" --provider openrouter --model google/gemini-2.0-flash-exp:free',
+    ),
+  );
+  logger.always("");
+  logger.always(chalk.green("Available models include:"));
+  logger.always("  • anthropic/claude-3.5-sonnet - Best for analysis");
+  logger.always("  • openai/gpt-4o - Industry standard");
+  logger.always("  • google/gemini-2.0-flash-exp:free - Free tier");
+  logger.always("  • meta-llama/llama-3.1-70b-instruct - Open source");
+  logger.always("");
+  logger.always(chalk.gray("See all models at: https://openrouter.ai/models"));
 }
 
 /**
@@ -575,7 +614,7 @@ async function showProviderList(): Promise<void> {
 
   const { action } = await inquirer.prompt([
     {
-      type: "list",
+      type: "select",
       name: "action",
       message: "Ready to set up a provider?",
       choices: [

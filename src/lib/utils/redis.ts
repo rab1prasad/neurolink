@@ -4,15 +4,141 @@
  */
 
 import { createClient, type RedisClientOptions } from "redis";
-import { logger } from "./logger.js";
 import type {
   ChatMessage,
-  RedisStorageConfig,
+  RedisClient,
   RedisConversationObject,
-} from "../types/conversation.js";
+  RedisStorageConfig,
+} from "../types/index.js";
+import { logger } from "./logger.js";
 
-// Redis client type
-type RedisClient = ReturnType<typeof createClient>;
+const SESSION_ONLY_PREFIX = "session-only:";
+
+// Connection pool - keyed by host:port:db
+const connectionPool = new Map<
+  string,
+  { client: RedisClient; refCount: number }
+>();
+const pendingConnections = new Map<string, Promise<RedisClient>>();
+
+/**
+ * Get a pooled Redis connection. Multiple callers with the same host:port:db
+ * share a single connection, reducing connection count.
+ */
+export async function getPooledRedisClient(
+  config: Required<RedisStorageConfig>,
+): Promise<RedisClient> {
+  const key = config.url
+    ? `url:${config.url.replace(/:\/\/[^:]+:[^@]+@/, "://[redacted]@")}`
+    : `${config.host}:${config.port}:${config.db}:${config.password ? "auth" : "noauth"}`;
+  const existing = connectionPool.get(key);
+
+  if (existing && existing.client.isOpen) {
+    existing.refCount++;
+    logger.debug("[Redis] Reusing pooled connection", {
+      key,
+      refCount: existing.refCount,
+    });
+    return existing.client;
+  }
+
+  // Check pending BEFORE cleaning up stale entries to prevent TOCTOU race:
+  // Two callers seeing a stale entry could both skip this check and both
+  // attempt to create new connections if we cleaned up first.
+  const pending = pendingConnections.get(key);
+  if (pending) {
+    const client = await pending;
+    const entry = connectionPool.get(key);
+    if (entry) {
+      if (!entry.client.isOpen) {
+        // Client was closed while awaiting; clean up and create fresh
+        connectionPool.delete(key);
+        const freshClient = await createRedisClient(config);
+        connectionPool.set(key, { client: freshClient, refCount: 1 });
+        return freshClient;
+      }
+      entry.refCount++;
+    } else if (client.isOpen) {
+      // Entry was released while we awaited; re-register
+      connectionPool.set(key, { client, refCount: 1 });
+    } else {
+      // Client was closed while we awaited; create fresh connection
+      const freshClient = await createRedisClient(config);
+      connectionPool.set(key, { client: freshClient, refCount: 1 });
+      return freshClient;
+    }
+    return client;
+  }
+
+  // Clean up stale entry if exists (connection closed)
+  if (existing) {
+    connectionPool.delete(key);
+  }
+
+  // Create the promise and register it in pendingConnections atomically
+  // (synchronous) before any await, so concurrent callers will find it.
+  const connectPromise = createRedisClient(config);
+  pendingConnections.set(key, connectPromise);
+
+  try {
+    const client = await connectPromise;
+    connectionPool.set(key, { client, refCount: 1 });
+    logger.info("[Redis] Created pooled connection", { key, refCount: 1 });
+    return client;
+  } finally {
+    pendingConnections.delete(key);
+  }
+}
+
+/**
+ * Release a pooled Redis connection. Only closes when refCount reaches 0.
+ */
+export async function releasePooledRedisClient(
+  config: Required<RedisStorageConfig>,
+): Promise<void> {
+  const key = `${config.host}:${config.port}:${config.db}:${config.password ? "auth" : "noauth"}`;
+  const entry = connectionPool.get(key);
+
+  if (!entry) {
+    return;
+  }
+
+  entry.refCount--;
+  logger.debug("[Redis] Released pooled connection", {
+    key,
+    refCount: entry.refCount,
+  });
+
+  if (entry.refCount <= 0) {
+    try {
+      if (entry.client.isOpen) {
+        await entry.client.quit();
+      }
+    } catch (e) {
+      logger.warn("[Redis] Error closing pooled connection", {
+        key,
+        error: String(e),
+      });
+    }
+    connectionPool.delete(key);
+    logger.info("[Redis] Closed pooled connection", { key });
+  }
+}
+
+/**
+ * Get stats about the connection pool
+ */
+export function getPoolStats(): Array<{
+  key: string;
+  refCount: number;
+  isOpen: boolean;
+}> {
+  return Array.from(connectionPool.entries()).map(([key, entry]) => ({
+    key,
+    refCount: entry.refCount,
+    isOpen: entry.client.isOpen,
+  }));
+}
 
 /**
  * Creates a Redis client with the provided configuration
@@ -20,7 +146,8 @@ type RedisClient = ReturnType<typeof createClient>;
 export async function createRedisClient(
   config: Required<RedisStorageConfig>,
 ): Promise<RedisClient> {
-  const url = `redis://${config.host}:${config.port}/${config.db}`;
+  const url =
+    config.url || `redis://${config.host}:${config.port}/${config.db}`;
 
   // Create client options
   const clientOptions: RedisClientOptions = {
@@ -34,7 +161,7 @@ export async function createRedisClient(
         }
         const delay = Math.min(
           (config.connectionOptions?.retryDelayOnFailover || 100) *
-            Math.pow(2, retries),
+            2 ** retries,
           10000,
         );
         return delay;
@@ -42,7 +169,7 @@ export async function createRedisClient(
     },
   };
 
-  if (config.password) {
+  if (config.password && !config.url) {
     clientOptions.password = config.password;
   }
 
@@ -84,7 +211,12 @@ export function getSessionKey(
   sessionId: string,
   userId?: string,
 ): string {
-  const key = `${config.keyPrefix}${userId || "randomUser"}:${sessionId}`;
+  if (!userId) {
+    logger.warn("[REDIS] getSessionKey called without userId", { sessionId });
+    return `${config.keyPrefix}${SESSION_ONLY_PREFIX}${sessionId}`;
+  }
+
+  const key = `${config.keyPrefix}${userId}:${sessionId}`;
 
   logger.debug("[redisUtils] Generated session key", {
     sessionId,
@@ -130,7 +262,7 @@ export function serializeConversation(
  * Deserializes conversation object from Redis storage
  */
 export function deserializeConversation(
-  data: string | null,
+  data: string | Buffer | null,
 ): RedisConversationObject | null {
   if (!data) {
     return null;
@@ -138,7 +270,7 @@ export function deserializeConversation(
 
   try {
     // Parse as unknown first, then validate before casting
-    const parsedData = JSON.parse(data) as unknown;
+    const parsedData = JSON.parse(String(data)) as unknown;
 
     // Check if the parsed data is an object with required properties
     if (
@@ -270,8 +402,8 @@ export async function scanKeys(
       });
 
       // Extract cursor and keys from result
-      cursor = result.cursor;
-      const keys = result.keys || [];
+      cursor = String(result.cursor);
+      const keys = (result.keys || []).map(String);
 
       // Add keys to result array
       allKeys.push(...keys);
@@ -317,11 +449,43 @@ export function getNormalizedConfig(
     "user:sessions:",
   );
 
+  let host = config.host || "localhost";
+  let port = config.port || 6379;
+  let username = config.username || "";
+  let password = config.password || "";
+  let db = config.db || 0;
+  let url = config.url;
+
+  if (url) {
+    try {
+      const parsedUrl = new URL(url);
+      host = parsedUrl.hostname;
+      port = parsedUrl.port ? parseInt(parsedUrl.port) : 6379;
+      username = parsedUrl.username || username;
+      password = parsedUrl.password || password;
+      db = parsedUrl.pathname
+        ? parseInt(parsedUrl.pathname.replace("/", "")) || 0
+        : 0;
+    } catch (e) {
+      const sanitizedUrl = url.replace(/:\/\/[^@]+@/, "://[redacted]@");
+      logger.warn(
+        "[redisUtils] Failed to parse Redis URL, falling back to component-based connection",
+        {
+          url: sanitizedUrl,
+          error: e instanceof Error ? e.message : String(e),
+        },
+      );
+      url = undefined;
+    }
+  }
+
   return {
-    host: config.host || "localhost",
-    port: config.port || 6379,
-    password: config.password || "",
-    db: config.db || 0,
+    url: url || "",
+    host,
+    port,
+    password,
+    username,
+    db,
     keyPrefix,
     userSessionsKeyPrefix:
       config.userSessionsKeyPrefix || defaultUserSessionsPrefix,

@@ -19,27 +19,18 @@ import {
   updateEnvFile as updateEnvFileShared,
   displayEnvUpdateSummary,
 } from "../utils/envManager.js";
+import { getTopModelChoices } from "../../lib/utils/modelChoices.js";
+import {
+  AIProviderName,
+  type ProviderSetupArgv,
+  type ProviderSetupConfig,
+  type ProviderSetupOptions,
+} from "../../lib/types/index.js";
+import { maskCredential } from "../utils/maskCredential.js";
 
-interface AzureSetupOptions {
-  checkOnly?: boolean;
-  interactive?: boolean;
-}
-
-interface AzureSetupArgv {
-  check?: boolean;
-  nonInteractive?: boolean;
-}
-
-interface AzureConfig {
-  apiKey?: string;
-  endpoint?: string;
-  model?: string;
-  isReconfiguring?: boolean;
-}
-
-export async function handleAzureSetup(argv: AzureSetupArgv): Promise<void> {
+export async function handleAzureSetup(argv: ProviderSetupArgv): Promise<void> {
   try {
-    const options: AzureSetupOptions = {
+    const options: ProviderSetupOptions = {
       checkOnly: argv.check || false,
       interactive: !argv.nonInteractive,
     };
@@ -74,7 +65,7 @@ export async function handleAzureSetup(argv: AzureSetupArgv): Promise<void> {
       return;
     }
 
-    const config: AzureConfig = {};
+    const config: ProviderSetupConfig = {};
 
     // Step 2: Handle existing configuration
     if (hasApiKey && hasEndpoint) {
@@ -392,31 +383,10 @@ function validateEndpoint(input: string): boolean | string {
 async function promptForModel(): Promise<string> {
   const { modelChoice } = await inquirer.prompt([
     {
-      type: "list",
+      type: "select",
       name: "modelChoice",
       message: "Select an Azure OpenAI model:",
-      choices: [
-        {
-          name: "gpt-4o (Latest multimodal model)",
-          value: "gpt-4o",
-        },
-        {
-          name: "gpt-4o-mini (Cost-effective)",
-          value: "gpt-4o-mini",
-        },
-        {
-          name: "gpt-4-turbo (Previous generation)",
-          value: "gpt-4-turbo",
-        },
-        {
-          name: "gpt-35-turbo (Legacy, most cost-effective)",
-          value: "gpt-35-turbo",
-        },
-        {
-          name: "Custom deployment name (enter manually)",
-          value: "custom",
-        },
-      ],
+      choices: getTopModelChoices(AIProviderName.AZURE, 5),
     },
   ]);
 
@@ -448,7 +418,9 @@ async function promptForModel(): Promise<string> {
 /**
  * Update .env file with Azure OpenAI configuration using shared utilities
  */
-async function updateEnvFileWithConfig(config: AzureConfig): Promise<void> {
+async function updateEnvFileWithConfig(
+  config: ProviderSetupConfig,
+): Promise<void> {
   const spinner = ora("💾 Updating .env file...").start();
 
   try {
@@ -481,21 +453,6 @@ async function updateEnvFileWithConfig(config: AzureConfig): Promise<void> {
     );
     throw error;
   }
-}
-
-/**
- * Mask API key for display
- */
-function maskCredential(credential: string): string {
-  if (!credential || credential.length < 8) {
-    return "****";
-  }
-
-  const start = credential.slice(0, 4);
-  const end = credential.slice(-4);
-  const middle = "*".repeat(Math.max(4, credential.length - 8));
-
-  return `${start}${middle}${end}`;
 }
 
 /**

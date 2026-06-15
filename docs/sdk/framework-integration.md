@@ -21,10 +21,27 @@ export const POST: RequestHandler = async ({ request }) => {
       maxTokens: 1000,
     });
 
-    return new Response(result.toReadableStream(), {
+    // Manually create ReadableStream from AsyncIterable
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of result.stream) {
+            if (chunk && typeof chunk === "object" && "content" in chunk) {
+              controller.enqueue(new TextEncoder().encode(chunk.content));
+            }
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(readable, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
+        Connection: "keep-alive",
       },
     });
   } catch (error) {
@@ -163,10 +180,27 @@ export const POST: RequestHandler = async ({ request }) => {
       maxTokens: 1000,
     });
 
-    return new Response(result.toReadableStream(), {
+    // Manually create ReadableStream from AsyncIterable
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of result.stream) {
+            if (chunk && typeof chunk === "object" && "content" in chunk) {
+              controller.enqueue(new TextEncoder().encode(chunk.content));
+            }
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(readable, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
+        Connection: "keep-alive",
         "X-Model-Used": result.model,
         "X-Provider-Used": result.provider,
       },
@@ -346,10 +380,27 @@ export async function PUT(request: NextRequest) {
       input: { text: prompt },
     });
 
-    return new Response(result.toReadableStream(), {
+    // Manually create ReadableStream from AsyncIterable
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of result.stream) {
+            if (chunk && typeof chunk === "object" && "content" in chunk) {
+              controller.enqueue(new TextEncoder().encode(chunk.content));
+            }
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(readable, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
+        Connection: "keep-alive",
       },
     });
   } catch (error) {
@@ -364,7 +415,7 @@ export async function PUT(request: NextRequest) {
 'use client';
 import { useState } from 'react';
 
-interface AIResponse {
+type AIResponse = {
   text: string;
   provider: string;
   usage?: {
@@ -587,8 +638,10 @@ app.post("/api/stream", async (req, res) => {
     res.setHeader("Content-Type", "text/plain");
     res.setHeader("Cache-Control", "no-cache");
 
-    for await (const chunk of result.textStream) {
-      res.write(chunk);
+    for await (const chunk of result.stream) {
+      if (chunk && typeof chunk === "object" && "content" in chunk) {
+        res.write(chunk.content);
+      }
     }
     res.end();
   } catch (error) {
@@ -699,6 +752,216 @@ app.post("/api/ai/batch", async (req, res) => {
 });
 ```
 
+## Fastify Integration
+
+Fastify is a high-performance web framework for Node.js. NeuroLink integrates smoothly with Fastify's async-first architecture.
+
+### Basic Server Setup
+
+```typescript
+import Fastify from "fastify";
+import { createBestAIProvider, AIProviderFactory } from "@juspay/neurolink";
+
+const fastify = Fastify({ logger: true });
+
+// Simple generation endpoint
+fastify.post("/api/generate", async (request, reply) => {
+  try {
+    const { prompt, options = {} } = request.body as {
+      prompt: string;
+      options?: Record<string, unknown>;
+    };
+
+    const provider = createBestAIProvider();
+    const result = await provider.generate({
+      input: { text: prompt },
+      ...options,
+    });
+
+    return {
+      success: true,
+      text: result.text,
+      provider: result.provider,
+      usage: result.usage,
+    };
+  } catch (error) {
+    reply.status(500);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
+  }
+});
+
+// Streaming endpoint
+fastify.post("/api/stream", async (request, reply) => {
+  try {
+    const { prompt } = request.body as { prompt: string };
+
+    const provider = createBestAIProvider();
+    const result = await provider.stream({
+      input: { text: prompt },
+    });
+
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/plain",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+
+    for await (const chunk of result.stream) {
+      if (chunk && typeof chunk === "object" && "content" in chunk) {
+        reply.raw.write(chunk.content);
+      }
+    }
+
+    reply.raw.end();
+  } catch (error) {
+    reply.status(500);
+    return { error: error instanceof Error ? error.message : "Unknown error" };
+  }
+});
+
+// Provider status endpoint
+fastify.get("/api/status", async () => {
+  const providers = ["openai", "bedrock", "vertex"];
+  const status: Record<
+    string,
+    { available: boolean; responseTime?: number; error?: string }
+  > = {};
+
+  for (const providerName of providers) {
+    try {
+      const provider = AIProviderFactory.createProvider(providerName);
+      const start = Date.now();
+
+      await provider.generate({
+        input: { text: "test" },
+        maxTokens: 1,
+      });
+
+      status[providerName] = {
+        available: true,
+        responseTime: Date.now() - start,
+      };
+    } catch (error) {
+      status[providerName] = {
+        available: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      };
+    }
+  }
+
+  return status;
+});
+
+// Start server
+const start = async () => {
+  try {
+    await fastify.listen({ port: 9876, host: "0.0.0.0" });
+    console.log("Server running on http://localhost:9876");
+  } catch (err) {
+    fastify.log.error(err);
+    process.exit(1);
+  }
+};
+
+start();
+```
+
+For a complete Fastify integration guide with hooks, plugins, and advanced patterns, see the [Fastify Integration Guide](../guides/frameworks/fastify.md).
+
+## NestJS Integration
+
+NestJS is an enterprise-grade Node.js framework built with TypeScript, featuring decorators, dependency injection, and a modular architecture. NeuroLink integrates naturally with NestJS patterns.
+
+### NeuroLink Module and Service
+
+```typescript
+// neurolink.module.ts
+import { Module, Global } from "@nestjs/common";
+import { NeuroLinkService } from "./neurolink.service";
+
+@Global()
+@Module({
+  providers: [NeuroLinkService],
+  exports: [NeuroLinkService],
+})
+export class NeuroLinkModule {}
+```
+
+```typescript
+// neurolink.service.ts
+import { Injectable, OnModuleInit } from "@nestjs/common";
+import { createBestAIProvider, AIProviderFactory } from "@juspay/neurolink";
+
+@Injectable()
+export class NeuroLinkService implements OnModuleInit {
+  private provider: ReturnType<typeof createBestAIProvider>;
+
+  onModuleInit() {
+    this.provider = createBestAIProvider();
+  }
+
+  async generate(prompt: string, options = {}) {
+    const result = await this.provider.generate({
+      input: { text: prompt },
+      ...options,
+    });
+
+    return {
+      text: result.text,
+      provider: result.provider,
+      usage: result.usage,
+    };
+  }
+
+  async *stream(prompt: string, options = {}) {
+    const result = await this.provider.stream({
+      input: { text: prompt },
+      ...options,
+    });
+
+    for await (const chunk of result.stream) {
+      if (chunk && typeof chunk === "object" && "content" in chunk) {
+        yield chunk.content;
+      }
+    }
+  }
+}
+```
+
+```typescript
+// ai.controller.ts
+import { Controller, Post, Body, Res } from "@nestjs/common";
+import { Response } from "express";
+import { NeuroLinkService } from "./neurolink.service";
+
+@Controller("api/ai")
+export class AIController {
+  constructor(private readonly neurolink: NeuroLinkService) {}
+
+  @Post("generate")
+  async generate(@Body() body: { prompt: string; options?: object }) {
+    return this.neurolink.generate(body.prompt, body.options);
+  }
+
+  @Post("stream")
+  async stream(@Body() body: { prompt: string }, @Res() res: Response) {
+    res.setHeader("Content-Type", "text/plain");
+    res.setHeader("Cache-Control", "no-cache");
+
+    for await (const chunk of this.neurolink.stream(body.prompt)) {
+      res.write(chunk);
+    }
+
+    res.end();
+  }
+}
+```
+
+[Full NestJS Guide](./nestjs-integration.md)
+
 ## React Hook (Universal)
 
 ### Custom Hook for AI Generation
@@ -706,14 +969,14 @@ app.post("/api/ai/batch", async (req, res) => {
 ```typescript
 import { useState, useCallback } from 'react';
 
-interface AIOptions {
+type AIOptions = {
   temperature?: number;
   maxTokens?: number;
   provider?: string;
   systemPrompt?: string;
 }
 
-interface AIResult {
+type AIResult = {
   text: string;
   provider: string;
   usage?: {
@@ -1126,4 +1389,4 @@ CMD ["npm", "start"]
 
 ---
 
-[← Back to Main README](../index.md) | [Next: Provider Configuration →](../getting-started/provider-setup.md)
+[← Back to Main README](./index.md) | [Next: Provider Configuration →](../getting-started/provider-setup.md)

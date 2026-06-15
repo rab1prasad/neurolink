@@ -20,22 +20,14 @@ import {
   updateEnvFile as updateEnvFileManager,
   displayEnvUpdateSummary,
 } from "../utils/envManager.js";
-
-interface GoogleAISetupOptions {
-  checkOnly?: boolean;
-  interactive?: boolean;
-}
-
-interface GoogleAISetupArgv {
-  check?: boolean;
-  nonInteractive?: boolean;
-}
-
-interface GoogleAIConfig {
-  apiKey?: string;
-  model?: string;
-  isReconfiguring?: boolean;
-}
+import { getTopModelChoices } from "../../lib/utils/modelChoices.js";
+import {
+  AIProviderName,
+  type ProviderSetupArgv,
+  type ProviderSetupConfig,
+  type ProviderSetupOptions,
+} from "../../lib/types/index.js";
+import { maskCredential } from "../utils/maskCredential.js";
 
 /**
  * Get the runtime default model that matches the provider implementation
@@ -45,10 +37,10 @@ function getRuntimeDefaultModel(): string {
 }
 
 export async function handleGoogleAISetup(
-  argv: GoogleAISetupArgv,
+  argv: ProviderSetupArgv,
 ): Promise<void> {
   try {
-    const options: GoogleAISetupOptions = {
+    const options: ProviderSetupOptions = {
       checkOnly: argv.check || false,
       interactive: !argv.nonInteractive,
     };
@@ -82,7 +74,7 @@ export async function handleGoogleAISetup(
       return;
     }
 
-    const config: GoogleAIConfig = {};
+    const config: ProviderSetupConfig = {};
 
     // Step 2: Handle existing configuration
     if (hasApiKey && currentApiKey) {
@@ -338,31 +330,10 @@ function validateApiKey(input: string): boolean | string {
 async function promptForModel(): Promise<string> {
   const { modelChoice } = await inquirer.prompt([
     {
-      type: "list",
+      type: "select",
       name: "modelChoice",
       message: "Select a Google AI model:",
-      choices: [
-        {
-          name: "gemini-2.5-pro (Recommended - Latest high-capability model)",
-          value: "gemini-2.5-pro",
-        },
-        {
-          name: "gemini-2.5-flash (Fast and efficient)",
-          value: "gemini-2.5-flash",
-        },
-        {
-          name: "gemini-pro-vision (Multimodal - text and images)",
-          value: "gemini-pro-vision",
-        },
-        {
-          name: "gemini-pro (Previous generation)",
-          value: "gemini-pro",
-        },
-        {
-          name: "Custom model (enter manually)",
-          value: "custom",
-        },
-      ],
+      choices: getTopModelChoices(AIProviderName.GOOGLE_AI, 5),
     },
   ]);
 
@@ -394,7 +365,7 @@ async function promptForModel(): Promise<string> {
 /**
  * Update .env file with Google AI Studio configuration
  */
-async function updateEnvFile(config: GoogleAIConfig): Promise<void> {
+async function updateEnvFile(config: ProviderSetupConfig): Promise<void> {
   const envPath = path.join(process.cwd(), ".env");
   const spinner = ora("💾 Updating .env file...").start();
 
@@ -429,21 +400,6 @@ async function updateEnvFile(config: GoogleAIConfig): Promise<void> {
     );
     throw error;
   }
-}
-
-/**
- * Mask API key for display
- */
-function maskCredential(credential: string): string {
-  if (!credential || credential.length < 8) {
-    return "****";
-  }
-
-  const start = credential.slice(0, 7); // Show 'AIza' plus a few chars
-  const end = credential.slice(-4);
-  const middle = "*".repeat(Math.max(4, credential.length - 11));
-
-  return `${start}${middle}${end}`;
 }
 
 /**

@@ -1,5 +1,139 @@
 # NeuroLink Technical Context
 
+## ✅ **GEMINI 3 NATIVE PATH — MULTI-TURN TOOL CALLING** (2026-04-17)
+
+### **Why the Native @google/genai Path Exists**
+
+Gemini 3 models (`gemini-3-pro-preview`, `gemini-3-flash-preview`) emit a `thoughtSignature` token on every response that contains tool calls. This opaque token **must** be echoed back verbatim on every subsequent function call part in conversation history. The Vercel AI SDK (`@ai-sdk/google-vertex`) silently strips this token during message construction, making multi-turn tool calling break after the first step.
+
+NeuroLink solves this by routing all Gemini 3 models to a **native `@google/genai` SDK path** that bypasses the Vercel layer entirely:
+- `executeNativeGemini3Stream` / `executeNativeGemini3StreamWithSpan` — stream path
+- `executeNativeGemini3Generate` — generate path
+- Shared helpers in `src/lib/providers/googleNativeGemini3.ts`
+
+### **`thoughtSignature` Replay Format**
+
+When replaying conversation history, `thoughtSignature` must be a **sibling field** on the part — not a wrapper around it:
+
+```typescript
+// CORRECT — thoughtSignature as sibling on functionCall part
+{
+  functionCall: { name: "myTool", args: { ... } },
+  thoughtSignature: "<opaque-token>"
+}
+
+// WRONG — thoughtSignature in a wrapper
+{
+  thoughtSignature: "<opaque-token>",
+  part: { functionCall: { ... } }
+}
+```
+
+Same rule applies to `text` parts (for assistant messages that came right before tool calls).
+
+### **`stepIndex` — Parallel Tool Call Grouping**
+
+Within a single agentic loop step, Gemini can return multiple function calls in one response (parallel calling). All of them must be in a **single model turn** in conversation history. Grouping them separately produces two consecutive model turns, which Gemini rejects.
+
+`stepIndex` is an integer counter that increments with each while-loop iteration in `executeNativeGemini3Stream`/`Generate`. It is stored on every `tool_call` and `tool_result` Redis message via `ChatMessageMetadata.stepIndex`.
+
+`prependConversationHistory` groups by composite key `turnCounter:stepIndex`:
+- `turnCounter` increments on each regular user/assistant text message — acts as a logical boundary between agentic loop invocations
+- `stepIndex` groups parallel calls within one invocation step
+
+### **Multi-Execution Session Overlap Bug**
+
+When `continueOrchestratorWorkflow` (or any orchestrator mechanism) triggers a **new invocation of the same `sessionId`**, both executions restart `stepIndex` at 1. With no regular text message between the two executions' tool messages, `turnCounter` stays at 0 for everything. The key `"0:1"` becomes shared between Exec A's step 1 and Exec B's step 1 — their tool calls are merged into the same Gemini model turn.
+
+**Visual Example:**
+
+```
+Redis session-123 (arrival order):
+  [Exec A] tool_call  { tool: "getChildAgentStatuses",  stepIndex: 1 }
+  [Exec A] tool_result { tool: "getChildAgentStatuses", stepIndex: 1 }
+  [Exec A] tool_call  { tool: "continueOrchestrator",   stepIndex: 2 }
+  [Exec A] tool_result { tool: "continueOrchestrator",  stepIndex: 2 }
+  [Exec B] tool_call  { tool: "getChildAgentStatuses",  stepIndex: 1 }  ← restarts!
+  [Exec B] tool_result { tool: "getChildAgentStatuses", stepIndex: 1 }
+
+prependConversationHistory groups by "turnCounter:stepIndex":
+  "0:1" → contains Exec A step 1 AND Exec B step 1  ← collision!
+  "0:2" → Exec A step 2 only (no overlap there)
+
+Resulting Gemini history (INVALID):
+  model turn: [ functionCall(getChildAgentStatuses), functionCall(getChildAgentStatuses) ]
+  user turn:  [ functionResponse(A), functionResponse(B) ]
+  model turn: [ functionCall(continueOrchestrator) ]
+  user turn:  [ functionResponse ]
+
+On new execution C's step 1 — Gemini sees "tools already ran" and returns text/stop:
+  stepFunctionCalls.length === 0 → loop exits immediately → execute() never called → no logs
+```
+
+**Fix (pending)**: Add `executionId = randomUUID()` once per `executeNativeGemini3*` call. Tag every `tool_call`/`tool_result`. Key becomes `exec:<executionId>:<stepIndex>`. Backward-compat fallback for old messages without `executionId`: `turn:<turnCounter>:<stepIndex>`.
+
+### **File Map for Native Gemini 3 Path**
+
+| File | Role |
+|------|------|
+| `src/lib/providers/googleVertex.ts` | Main provider: native stream/generate paths, `prependConversationHistory` |
+| `src/lib/providers/googleNativeGemini3.ts` | Shared helpers: `extractThoughtSignature`, `collectStreamChunksIncremental`, `buildNativeToolDeclarations`, `buildNativeConfig`, `executeNativeToolCalls`, `handleMaxStepsTermination` |
+| `src/lib/types/conversation.ts` | `ChatMessageMetadata.stepIndex`, `ChatMessageMetadata.thoughtSignature` |
+| `src/lib/types/tools.ts` | `PendingToolExecution.toolCalls[].stepIndex`, `PendingToolExecution.toolCalls[].thoughtSignature`, `PendingToolExecution.toolResults[].stepIndex` |
+| `src/lib/core/redisConversationMemoryManager.ts` | `flushPendingToolData` — stores `stepIndex` + `thoughtSignature` on Redis messages |
+| `src/lib/utils/conversationMemory.ts` | `thoughtSignature` passthrough in the `handleToolExecutionStorage` call chain |
+
+### **Timeout Behaviour on Native Generate Path**
+- Default 5 minutes (`300000` ms) — covers multi-step agentic loops with many tool calls
+- Configurable via `options.timeout` (human-readable: `"2m"`, `"300s"`, milliseconds)
+- After `collectStreamChunks`, checks `composedSignal?.aborted` and throws `TimeoutError` if the signal was set — prevents silent empty-response returns when the clock runs out mid-stream
+
+---
+
+## ✅ **GEMINI 3 EXTENDED THINKING TECHNICAL IMPLEMENTATION** (2025-12-31)
+
+### **Extended Thinking Configuration**
+```typescript
+// thinkingLevel configuration for Gemini 3 models
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
+
+export type Gemini3Options = {
+  thinkingLevel?: ThinkingLevel;  // Controls extended thinking depth
+};
+
+// Usage in NeuroLink SDK
+const neurolink = new NeuroLink({
+  provider: 'google-ai',
+  model: 'gemini-3-pro',
+  thinkingLevel: 'high'  // Enables deep reasoning mode
+});
+
+// Usage in generate options
+const result = await neurolink.generate({
+  input: { text: 'Analyze this complex problem...' },
+  thinkingLevel: 'medium'  // Override per-request
+});
+```
+
+### **Gemini 3 Model Capabilities**
+| Model | Extended Thinking | Context Window | Best For |
+|-------|------------------|----------------|----------|
+| gemini-3-pro | Yes (minimal/low/medium/high) | 1M tokens | Complex reasoning, analysis |
+| gemini-3-flash | Yes (minimal/low/medium/high) | 1M tokens | Fast inference with thinking |
+
+### **thinkingLevel Impact**
+- **minimal**: Minimal extended thinking, fastest response
+- **low**: Light thinking depth, quick reasoning tasks
+- **medium**: Balanced thinking depth, good for most use cases
+- **high**: Deep reasoning mode, best for complex multi-step problems
+
+### **Technical Integration**
+- **Provider**: Google AI Studio (`google-ai`)
+- **Backward Compatibility**: Existing Gemini 2.x code continues to work
+- **Configuration Priority**: Per-request thinkingLevel overrides SDK default
+
+---
+
 ## ✅ **CLI LOOP COMMAND HISTORY TECHNICAL IMPLEMENTATION** (2025-09-18)
 
 ### **Readline Integration Architecture**
@@ -154,18 +288,18 @@ const PERFORMANCE_METRICS = {
 ### **Factory-Enhanced Architecture Implementation**
 ```typescript
 // NEW: Core interfaces for generate() function
-interface GenerateOptions {
+type GenerateOptions = {
   input: { text: string };
   output?: { format?: 'text' | 'structured' | 'json' };
   provider?: AIProviderName;
   // ... all existing TextGenerationOptions preserved
-}
+};
 
-interface GenerateResult {
+type GenerateResult = {
   content: string;
   outputs?: { text: string };
   // ... all existing fields preserved
-}
+};
 
 // Factory pattern implementation
 class ProviderGenerateFactory {
@@ -455,7 +589,7 @@ export class HealthMonitor extends EventEmitter {
 ### **Error Categorization System**
 ```typescript
 // 5-category, 4-severity error classification
-export interface CategorizedError {
+export type CategorizedError = {
   id: string;
   category: ErrorCategory;
   severity: ErrorSeverity;
@@ -465,7 +599,7 @@ export interface CategorizedError {
   timestamp: number;
   recoveryAttempts: number;
   resolved: boolean;
-}
+};
 
 export class ErrorManager {
   private errorHistory: Map<string, CategorizedError[]> = new Map();
@@ -504,16 +638,16 @@ export class ErrorManager {
 ### **Transport Abstraction Layer**
 ```typescript
 // Protocol-agnostic transport interface
-export interface MCPTransport {
+export type MCPTransport = {
   type: 'stdio' | 'sse' | 'http';
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   send(message: any): Promise<void>;
   receive(): AsyncIterableIterator<any>;
   getStatus(): ConnectionStatus;
-}
+};
 
-// stdio implementation
+// stdio implementation - Local MCP servers
 export class StdioTransport implements MCPTransport {
   type = 'stdio' as const;
   private process: ChildProcess;
@@ -525,7 +659,7 @@ export class StdioTransport implements MCPTransport {
   }
 }
 
-// SSE implementation
+// SSE implementation - Legacy remote servers
 export class SSETransport implements MCPTransport {
   type = 'sse' as const;
   private eventSource: EventSource;
@@ -534,14 +668,75 @@ export class SSETransport implements MCPTransport {
     this.eventSource = new EventSource(this.url);
   }
 }
+
+// HTTP/Streamable HTTP implementation - Remote MCP APIs (MCP 2025 spec)
+export class HTTPTransport implements MCPTransport {
+  type = 'http' as const;
+  private url: string;
+  private headers: Record<string, string>;
+  private sessionId?: string;
+
+  async connect(): Promise<void> {
+    // Uses StreamableHTTPClientTransport from @modelcontextprotocol/sdk
+    this.transport = new StreamableHTTPClientTransport(new URL(this.url), {
+      requestInit: { headers: this.headers }
+    });
+  }
+}
+```
+
+### **HTTP Transport Configuration (NEW)**
+```typescript
+// HTTP transport configuration for remote MCP servers
+type HTTPTransportConfig = {
+  transport: 'http';                    // Required: transport type
+  url: string;                          // Required: HTTP endpoint URL
+  headers?: Record<string, string>;     // Optional: auth headers
+  httpOptions?: {
+    timeout?: number;                   // Connection timeout (ms)
+    retries?: number;                   // Max retry attempts
+  };
+  retryConfig?: {
+    maxRetries?: number;
+    initialDelayMs?: number;
+    maxDelayMs?: number;
+  };
+  rateLimiting?: {
+    maxRequestsPerSecond?: number;
+    burstLimit?: number;
+  };
+};
+
+// Example: GitHub Copilot MCP configuration
+const githubCopilotConfig = {
+  transport: 'http',
+  url: 'https://api.githubcopilot.com/mcp',
+  headers: {
+    Authorization: 'Bearer YOUR_GITHUB_COPILOT_TOKEN'
+  },
+  httpOptions: { timeout: 15000, retries: 3 }
+};
 ```
 
 ### **Transport Technology Stack**
-- **stdio**: Child process communication
-- **SSE**: Server-Sent Events with EventSource
-- **HTTP**: Fetch API with custom retry logic
+- **stdio**: Child process communication (local servers)
+- **SSE**: Server-Sent Events with EventSource (legacy remote)
+- **HTTP/Streamable HTTP**: MCP 2025 specification for remote APIs
+  - Uses `StreamableHTTPClientTransport` from `@modelcontextprotocol/sdk`
+  - Supports custom headers for authentication (Bearer tokens, API keys)
+  - Session management via `Mcp-Session-Id` header
+  - Automatic reconnection with exponential backoff
+  - Both streaming (SSE) and batch JSON responses
 - **Failover**: Automatic protocol switching
 - **Connection Pooling**: Reuse existing connections
+
+### **HTTP Transport Use Cases**
+| Use Case | Configuration | Authentication |
+|----------|--------------|----------------|
+| GitHub Copilot MCP | `transport: "http"` | Bearer token |
+| Enterprise API Gateway | `transport: "http"` | API key header |
+| Custom MCP Service | `transport: "http"` | Custom headers |
+| Multi-cloud MCP | `transport: "http"` | Provider-specific |
 
 ---
 
@@ -738,8 +933,13 @@ export enum OpenAIModels {
 }
 
 export enum GoogleAIModels {
+  // Gemini 3 Models (Latest - with Extended Thinking)
+  GEMINI_3_PRO = 'gemini-3-pro',
+  GEMINI_3_FLASH = 'gemini-3-flash',
+  // Gemini 2.5 Models
   GEMINI_2_5_PRO = 'gemini-2.5-pro',
   GEMINI_2_5_FLASH = 'gemini-2.5-flash',
+  // Legacy Models
   GEMINI_PRO = 'gemini-pro',
   GEMINI_PRO_VISION = 'gemini-pro-vision'
 }
@@ -1144,7 +1344,8 @@ generate({
   - `ai`: Core AI utilities from Vercel
   - `@ai-sdk/openai`: OpenAI integration
   - `@ai-sdk/amazonBedrock`: Amazon Bedrock integration
-  - `@ai-sdk/googleVertex`: Google Vertex AI integration
+  - `@google/genai`: Google AI Studio and Vertex AI Gemini provider (native SDK; replaced `@ai-sdk/google-vertex` in v9.64.0, commit `076b9f4c`)
+  - `@anthropic-ai/vertex-sdk`: Claude on Vertex AI (native SDK; replaced `@ai-sdk/google-vertex/anthropic` in v9.64.0)
   - `zod`: Schema validation
 
 ## Development Environment
@@ -1302,10 +1503,10 @@ pnpm test
 
 ## Known Technical Debt
 
-1. **Google Vertex AI Anthropic Import**: The Google Vertex AI provider imports `@ai-sdk/googleVertex/anthropic` which is not exported by the Google Vertex package. This needs to be fixed in a future release.
+1. **Error Handling Consistency**: Error handling could be more consistent across providers, especially for network errors and rate limiting.
 
-2. **Error Handling Consistency**: Error handling could be more consistent across providers, especially for network errors and rate limiting.
+2. **Documentation Coverage**: Not all error scenarios are fully documented with examples.
 
-3. **Documentation Coverage**: Not all error scenarios are fully documented with examples.
+3. **Test Coverage**: More comprehensive test coverage for edge cases needed.
 
-4. **Test Coverage**: More comprehensive test coverage for edge cases needed.
+> **Resolved (v9.64.0):** ~~Google Vertex AI Anthropic Import~~ — `googleVertex.ts` migrated off `@ai-sdk/google-vertex/anthropic` (which was never exported by the upstream package) to native `@google/genai` + `@anthropic-ai/vertex-sdk` (commit `076b9f4c`). `scripts/check-banned-deps.ts` blocks any reintroduction of `@ai-sdk/google-vertex*` at the source level.

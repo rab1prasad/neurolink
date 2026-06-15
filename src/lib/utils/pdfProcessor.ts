@@ -1,13 +1,30 @@
+/**
+ * PDF Processor with Image Fallback Support
+ *
+ * Handles PDF processing for all providers:
+ * - Native PDF support for providers that accept PDF directly (Google AI, Vertex, OpenAI, Anthropic, Bedrock)
+ * - PDF → Image conversion for providers that don't support native PDF (Azure, Mistral, Ollama)
+ *
+ * The conversion uses pdf-to-img package (MuPDF-based) for high-quality conversion.
+ */
+
+import { PDF_LIMITS } from "../core/constants.js";
 import type {
   FileProcessingResult,
-  PDFProviderConfig,
   PDFProcessorOptions,
-} from "../types/fileTypes.js";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+  PDFProviderConfig,
+  PDFImageConversionOptions,
+  PDFImageConversionResult,
+} from "../types/index.js";
+import { ErrorFactory } from "./errorHandling.js";
 import { logger } from "./logger.js";
-// Lazy-load pdfjs-dist to avoid DOMMatrix errors in Node.js server environment
-// import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 
+/**
+ * Provider configurations for PDF handling
+ *
+ * supportsNative: true = Send PDF as FilePart (mimeType: application/pdf)
+ * supportsNative: false = Convert PDF pages to PNG images and send as ImageParts
+ */
 const PDF_PROVIDER_CONFIGS: Record<string, PDFProviderConfig> = {
   anthropic: {
     maxSizeMB: 5,
@@ -65,17 +82,18 @@ const PDF_PROVIDER_CONFIGS: Record<string, PDFProviderConfig> = {
     requiresCitations: false,
     apiType: "files-api",
   },
+  // Azure does NOT support native PDF - must convert to images
   azure: {
     maxSizeMB: 10,
     maxPages: 100,
-    supportsNative: true,
+    supportsNative: false,
     requiresCitations: false,
     apiType: "files-api",
   },
   "azure-openai": {
     maxSizeMB: 10,
     maxPages: 100,
-    supportsNative: true,
+    supportsNative: false,
     requiresCitations: false,
     apiType: "files-api",
   },
@@ -89,7 +107,7 @@ const PDF_PROVIDER_CONFIGS: Record<string, PDFProviderConfig> = {
   "openai-compatible": {
     maxSizeMB: 10,
     maxPages: 100,
-    supportsNative: true,
+    supportsNative: false, // LiteLLM is a proxy — underlying model may not support native PDF; default to safe text extraction
     requiresCitations: false,
     apiType: "files-api",
   },
@@ -120,6 +138,10 @@ export class PDFProcessor {
   // PDF magic bytes: %PDF-
   private static readonly PDF_SIGNATURE = Buffer.from("%PDF-", "ascii");
 
+  // ============================================================================
+  // PDF Validation & Processing
+  // ============================================================================
+
   static async process(
     content: Buffer,
     options?: PDFProcessorOptions,
@@ -127,7 +149,7 @@ export class PDFProcessor {
     const provider = (options?.provider || "unknown").toLowerCase();
     const config = PDF_PROVIDER_CONFIGS[provider];
 
-    if (!this.isValidPDF(content)) {
+    if (!PDFProcessor.isValidPDF(content)) {
       throw new Error(
         "Invalid PDF file format. File must start with %PDF- header.",
       );
@@ -153,13 +175,24 @@ export class PDFProcessor {
       );
     }
 
-    const metadata = this.extractBasicMetadata(content);
+    const metadata = PDFProcessor.extractBasicMetadata(content);
 
     if (metadata.estimatedPages && metadata.estimatedPages > config.maxPages) {
-      logger.warn(
-        `[PDF] PDF appears to have ${metadata.estimatedPages}+ pages. ` +
-          `${provider} supports up to ${config.maxPages} pages.`,
-      );
+      const enforceLimits = options?.enforceLimits !== false;
+
+      if (enforceLimits) {
+        throw ErrorFactory.pdfPageLimitExceeded(
+          metadata.estimatedPages,
+          config.maxPages,
+          provider,
+        );
+      } else {
+        logger.warn(
+          `[PDF] ⚠️ LIMIT BYPASS: Processing ${metadata.estimatedPages}-page PDF despite ${config.maxPages}-page limit for ${provider}. ` +
+            `This may cause API rejection, token errors, or unexpected costs. ` +
+            `Consider splitting the PDF or using a different provider.`,
+        );
+      }
     }
 
     if (provider === "bedrock" && options?.bedrockApiMode === "converse") {
@@ -177,6 +210,7 @@ export class PDFProcessor {
       version: metadata.version,
       estimatedPages: metadata.estimatedPages,
       apiType: config.apiType,
+      supportsNative: config.supportsNative,
     });
 
     return {
@@ -193,9 +227,15 @@ export class PDFProcessor {
     };
   }
 
+  /**
+   * Check if a provider supports native PDF input
+   * @param provider - Provider name
+   * @returns true if provider can accept PDF directly, false if requires image conversion
+   */
   static supportsNativePDF(provider: string): boolean {
-    const config = PDF_PROVIDER_CONFIGS[provider];
-    return config?.supportsNative || false;
+    const normalizedProvider = provider.toLowerCase();
+    const config = PDF_PROVIDER_CONFIGS[normalizedProvider];
+    return config?.supportsNative ?? false;
   }
 
   static getProviderConfig(provider: string): PDFProviderConfig | null {
@@ -206,7 +246,7 @@ export class PDFProcessor {
     if (buffer.length < 5) {
       return false;
     }
-    return buffer.subarray(0, 5).equals(this.PDF_SIGNATURE);
+    return buffer.subarray(0, 5).equals(PDFProcessor.PDF_SIGNATURE);
   }
 
   private static extractBasicMetadata(buffer: Buffer) {
@@ -237,130 +277,234 @@ export class PDFProcessor {
     }
   }
 
-  static async convertPDFToImages(
+  // ============================================================================
+  // PDF → Image Conversion (for providers without native PDF support)
+  // ============================================================================
+
+  /**
+   * Convert a PDF buffer to an array of base64 PNG images
+   *
+   * This is used automatically when a provider (like Azure, Mistral, Ollama) doesn't
+   * support native PDF input but does support image input. The PDF pages are converted
+   * to PNG images and sent as vision content.
+   *
+   * @param pdfBuffer - PDF file content as Buffer
+   * @param options - Conversion options
+   * @returns Promise with conversion result including base64 images
+   *
+   * @example
+   * ```typescript
+   * // Check if conversion is needed
+   * if (!PDFProcessor.supportsNativePDF('azure')) {
+   *   const result = await PDFProcessor.convertToImages(pdfBuffer, {
+   *     scale: 2,
+   *     maxPages: 10
+   *   });
+   *   // Use images in LLM input instead of PDF
+   *   options.input.images = result.images;
+   * }
+   * ```
+   */
+  static async convertToImages(
     pdfBuffer: Buffer,
-    options?: {
-      maxPages?: number;
-      scale?: number;
-      format?: "png" | "jpeg";
-      quality?: number;
-    },
-  ): Promise<Array<{ buffer: Buffer; pageNumber: number }>> {
-    // Dynamic import canvas - only load when actually needed
-    let createCanvas: typeof import("canvas").createCanvas;
-    try {
-      const canvasModule = await import("canvas");
-      createCanvas = canvasModule.createCanvas;
-    } catch {
+    options?: PDFImageConversionOptions,
+  ): Promise<PDFImageConversionResult> {
+    const startTime = Date.now();
+    const {
+      scale = 2,
+      maxPages = PDF_LIMITS.DEFAULT_MAX_PAGES,
+      format = "png",
+    } = options || {};
+    const images: string[] = [];
+    const warnings: string[] = [];
+
+    // ============================================================================
+    // INPUT VALIDATION (Security: Prevent malformed/malicious PDF processing)
+    // ============================================================================
+
+    // 0. Validate format is supported and case-sensitive
+    if (format !== "png") {
       throw new Error(
-        "Canvas dependency not available. " +
-          "PDF-to-image conversion requires the 'canvas' package with native bindings. " +
-          "Install with: pnpm install canvas\n" +
-          "Note: This requires native build tools (Python, C++ compiler).",
+        `Invalid format: "${format}". Only "png" format is currently supported.`,
       );
     }
 
-    // Dynamic import pdfjs - only load when actually needed to avoid DOMMatrix errors
-    let pdfjs: typeof import("pdfjs-dist/legacy/build/pdf.mjs");
-    try {
-      pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    } catch {
+    // 1. Validate buffer is not empty or too small
+    if (!pdfBuffer || pdfBuffer.length < 5) {
       throw new Error(
-        "pdfjs-dist dependency not available. " +
-          "PDF processing requires the 'pdfjs-dist' package. " +
-          "Install with: pnpm install pdfjs-dist",
+        "Invalid PDF: Buffer is too small or empty. " +
+          "A valid PDF must be at least 5 bytes (PDF header).",
       );
     }
 
-    const maxPages = options?.maxPages || 10;
-    const scale = options?.scale || 2.0;
-    const format = options?.format || "png";
-    const quality = options?.quality || 0.9;
-
-    // Validate format
-    if (format !== "png" && format !== "jpeg") {
+    // 2. Validate PDF magic bytes (%PDF-)
+    if (!PDFProcessor.isValidPDF(pdfBuffer)) {
       throw new Error(
-        `Invalid format: "${format}". Supported formats: "png", "jpeg".`,
+        "Invalid PDF: File must start with %PDF- header. " +
+          "The provided buffer does not appear to be a valid PDF file.",
       );
     }
 
-    let pdfDocument: PDFDocumentProxy | null = null;
+    // 3. Validate maximum buffer size to prevent memory exhaustion
+    const sizeMB = pdfBuffer.length / (1024 * 1024);
+    if (sizeMB > PDF_LIMITS.MAX_SIZE_MB) {
+      throw new Error(
+        `PDF too large for image conversion: ${sizeMB.toFixed(2)}MB exceeds ${PDF_LIMITS.MAX_SIZE_MB}MB limit. ` +
+          "Consider splitting the PDF or using a provider with native PDF support.",
+      );
+    }
+
+    logger.debug("[PDF→Image] ✅ PDF validation passed", {
+      bufferSize: pdfBuffer.length,
+      sizeMB: sizeMB.toFixed(2),
+      maxPages,
+    });
 
     try {
-      const loadingTask = pdfjs.getDocument({
-        data: new Uint8Array(pdfBuffer),
-        useSystemFonts: true,
-        standardFontDataUrl: `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/standard_fonts/`,
+      // Dynamic import to avoid loading MuPDF binaries until needed
+      const pdfToImgModule = await import("pdf-to-img");
+      const pdf = pdfToImgModule.pdf;
+
+      logger.debug("[PDF→Image] Starting PDF to image conversion", {
+        bufferSize: pdfBuffer.length,
+        scale,
+        maxPages: maxPages || "all",
       });
 
-      pdfDocument = await loadingTask.promise;
-      const numPages = Math.min(pdfDocument.numPages, maxPages);
-      const images: Array<{ buffer: Buffer; pageNumber: number }> = [];
+      // Create PDF document iterator
+      const document = await pdf(pdfBuffer, { scale });
 
-      logger.info(
-        `[PDF→Image] Converting ${numPages} page(s) from PDF (total: ${pdfDocument.numPages})`,
-      );
+      let pageIndex = 0;
 
-      for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-        const page = await pdfDocument.getPage(pageNum);
-        const viewport = page.getViewport({ scale });
-
-        const canvas = createCanvas(viewport.width, viewport.height);
-        const context = canvas.getContext("2d");
-
-        await page.render({
-          canvasContext: context as unknown as CanvasRenderingContext2D,
-          viewport,
-          // @ts-expect-error - canvas type mismatch between node-canvas and pdfjs-dist
-          canvas: canvas,
-        }).promise;
-
-        const imageBuffer =
-          format === "png"
-            ? canvas.toBuffer("image/png")
-            : canvas.toBuffer("image/jpeg", { quality });
-
-        images.push({ buffer: imageBuffer, pageNumber: pageNum });
-
-        logger.debug(
-          `[PDF→Image] ✅ Converted page ${pageNum}/${numPages} (${(imageBuffer.length / 1024).toFixed(1)}KB)`,
-        );
-      }
-
-      if (pdfDocument.numPages > maxPages) {
-        logger.warn(
-          `[PDF→Image] PDF has ${pdfDocument.numPages} pages, converted only first ${maxPages} pages`,
-        );
-      }
-
-      logger.info(
-        `[PDF→Image] ✅ Successfully converted ${images.length} page(s) to images`,
-      );
-
-      return images;
-    } catch (error) {
-      logger.error(
-        `[PDF→Image] ❌ Failed to convert PDF to images:`,
-        error instanceof Error ? error.message : String(error),
-      );
-      throw new Error(
-        `PDF to image conversion failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    } finally {
-      // Ensure pdfDocument is destroyed regardless of success or failure
-      if (pdfDocument) {
-        try {
-          pdfDocument.destroy();
-          logger.debug("[PDF→Image] PDF document resources cleaned up");
-        } catch (destroyError) {
-          logger.warn(
-            "[PDF→Image] Error destroying PDF document:",
-            destroyError instanceof Error
-              ? destroyError.message
-              : String(destroyError),
+      // Iterate through pages and convert to base64
+      for await (const page of document) {
+        // Check if we've reached the max pages limit
+        if (maxPages !== undefined && pageIndex >= maxPages) {
+          warnings.push(
+            `Stopped at page ${pageIndex} (maxPages limit: ${maxPages})`,
           );
+          break;
         }
+
+        // Convert PNG buffer to base64
+        const base64Image = page.toString("base64");
+        images.push(base64Image);
+        pageIndex++;
+
+        logger.debug(`[PDF→Image] Converted page ${pageIndex}`, {
+          imageSizeBytes: page.length,
+          base64Length: base64Image.length,
+        });
       }
+
+      // Check for empty PDF (0 pages)
+      if (images.length === 0) {
+        throw new Error("PDF has 0 pages. Cannot convert empty PDF to images.");
+      }
+
+      const conversionTimeMs = Date.now() - startTime;
+
+      logger.info("[PDF→Image] ✅ PDF conversion completed", {
+        pageCount: images.length,
+        conversionTimeMs,
+        totalImageBytes: images.reduce((sum, img) => sum + img.length, 0),
+      });
+
+      return {
+        images,
+        pageCount: images.length,
+        conversionTimeMs,
+        warnings: warnings.length > 0 ? warnings : undefined,
+      };
+    } catch (error) {
+      const conversionTimeMs = Date.now() - startTime;
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      logger.error("[PDF→Image] ❌ PDF conversion failed", {
+        error: errorMessage,
+        conversionTimeMs,
+      });
+
+      throw new Error(`PDF to image conversion failed: ${errorMessage}`, {
+        cause: error,
+      });
     }
   }
+
+  /**
+   * Convert a PDF file path to an array of base64 PNG images
+   *
+   * @param pdfPath - Path to the PDF file
+   * @param options - Conversion options
+   * @returns Promise with conversion result
+   */
+  static async convertFromPath(
+    pdfPath: string,
+    options?: PDFImageConversionOptions,
+  ): Promise<PDFImageConversionResult> {
+    const fs = await import("fs/promises");
+    const pdfBuffer = await fs.readFile(pdfPath);
+    return PDFProcessor.convertToImages(pdfBuffer, options);
+  }
+
+  /**
+   * Check if PDF to image conversion is available
+   * Useful for feature detection
+   *
+   * @returns true if pdf-to-img package is available
+   */
+  static async isImageConversionAvailable(): Promise<boolean> {
+    try {
+      await import("pdf-to-img");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get estimated memory usage for converting a PDF
+   *
+   * @param pdfSizeBytes - Size of PDF file in bytes
+   * @param pageCount - Estimated number of pages
+   * @param scale - Scale factor
+   * @returns Estimated memory usage in MB
+   */
+  static estimateConversionMemoryUsage(
+    pdfSizeBytes: number,
+    pageCount: number,
+    scale: number = 2,
+  ): number {
+    // Rough estimation:
+    // - Each page at scale 2 produces ~1-3MB PNG
+    // - MuPDF needs ~2x PDF size for processing
+    // - Output images need ~2MB per page on average
+
+    const pdfProcessingMB = (pdfSizeBytes / (1024 * 1024)) * 2;
+    const outputImagesMB = pageCount * 2 * scale;
+
+    return Math.ceil(pdfProcessingMB + outputImagesMB);
+  }
+
+  /**
+   * Get list of providers that require PDF → Image conversion
+   */
+  static getImageFallbackProviders(): string[] {
+    return Object.entries(PDF_PROVIDER_CONFIGS)
+      .filter(([_, config]) => !config.supportsNative)
+      .map(([name]) => name);
+  }
+
+  /**
+   * Get list of providers that support native PDF
+   */
+  static getNativePDFProviders(): string[] {
+    return Object.entries(PDF_PROVIDER_CONFIGS)
+      .filter(([_, config]) => config.supportsNative)
+      .map(([name]) => name);
+  }
 }
+
+// Export PDFImageConverter as an alias for backward compatibility
+export const PDFImageConverter = PDFProcessor;

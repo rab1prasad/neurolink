@@ -5,7 +5,7 @@
  * Supports multiple time formats: milliseconds, seconds, minutes, hours.
  */
 
-import type { TimeoutConfig, TimeoutResult } from "../types/utilities.js";
+import type { TimeoutConfig, TimeoutResult } from "../types/index.js";
 
 /**
  * Custom error class for timeout operations
@@ -441,6 +441,12 @@ export function createTimeoutController(
   const controller = new AbortController();
 
   const timer = setTimeout(() => {
+    // NOTE: we cannot stamp the AI SDK's ai.streamText/ai.generateText span
+    // from here — the setTimeout callback runs in the async context captured
+    // at schedule time, which is BEFORE the AI SDK span exists. Instead we
+    // rely on the AI SDK propagating the TimeoutError through its recordSpan
+    // wrapper, which sets span.status = ERROR + message. ContextEnricher's
+    // SpanStatusCode.ERROR branch then surfaces level=ERROR + status_message.
     controller.abort(
       new TimeoutError(
         `${provider} ${operation} operation timed out after ${timeout}`,
@@ -456,6 +462,25 @@ export function createTimeoutController(
   };
 
   return { controller, cleanup, timeoutMs };
+}
+
+/**
+ * Compose an external abort signal with a timeout controller's signal.
+ * Returns a single AbortSignal that fires when either signal aborts.
+ * If only one signal is present, returns it directly without wrapping.
+ *
+ * @param externalSignal - User-provided AbortSignal (e.g., from options.abortSignal)
+ * @param timeoutSignal - Timeout controller's signal
+ * @returns Combined AbortSignal, or undefined if neither is present
+ */
+export function composeAbortSignals(
+  externalSignal?: AbortSignal,
+  timeoutSignal?: AbortSignal,
+): AbortSignal | undefined {
+  if (externalSignal && timeoutSignal) {
+    return AbortSignal.any([externalSignal, timeoutSignal]);
+  }
+  return externalSignal ?? timeoutSignal;
 }
 
 /**

@@ -2,10 +2,11 @@
  * Robust Error Handling Utilities for NeuroLink
  * Provides structured error management for tool execution and system operations
  */
-
 import { ErrorCategory, ErrorSeverity } from "../constants/enums.js";
-import type { StructuredError } from "../types/utilities.js";
+import type { StructuredError } from "../types/index.js";
 import { logger } from "./logger.js";
+import { CircuitBreakerOpenError } from "../types/index.js";
+import { HITLTimeoutError } from "../hitl/hitlErrors.js";
 
 // Error codes for different scenarios
 export const ERROR_CODES = {
@@ -29,9 +30,54 @@ export const ERROR_CODES = {
   PROVIDER_AUTH_FAILED: "PROVIDER_AUTH_FAILED",
   PROVIDER_QUOTA_EXCEEDED: "PROVIDER_QUOTA_EXCEEDED",
 
+  // Cancellation
+  OPERATION_ABORTED: "OPERATION_ABORTED",
+
   // Configuration errors
   INVALID_CONFIGURATION: "INVALID_CONFIGURATION",
   MISSING_CONFIGURATION: "MISSING_CONFIGURATION",
+
+  // Video validation errors
+  INVALID_VIDEO_RESOLUTION: "INVALID_VIDEO_RESOLUTION",
+  INVALID_VIDEO_LENGTH: "INVALID_VIDEO_LENGTH",
+  INVALID_VIDEO_ASPECT_RATIO: "INVALID_VIDEO_ASPECT_RATIO",
+  INVALID_VIDEO_AUDIO: "INVALID_VIDEO_AUDIO",
+  INVALID_VIDEO_MODE: "INVALID_VIDEO_MODE",
+  MISSING_VIDEO_IMAGE: "MISSING_VIDEO_IMAGE",
+  EMPTY_VIDEO_PROMPT: "EMPTY_VIDEO_PROMPT",
+  VIDEO_PROMPT_TOO_LONG: "VIDEO_PROMPT_TOO_LONG",
+
+  // Image validation errors
+  EMPTY_IMAGE_PATH: "EMPTY_IMAGE_PATH",
+  INVALID_IMAGE_TYPE: "INVALID_IMAGE_TYPE",
+  IMAGE_TOO_LARGE: "IMAGE_TOO_LARGE",
+  IMAGE_TOO_SMALL: "IMAGE_TOO_SMALL",
+  INVALID_IMAGE_FORMAT: "INVALID_IMAGE_FORMAT",
+
+  // PDF validation errors
+  PDF_PAGE_LIMIT_EXCEEDED: "PDF_PAGE_LIMIT_EXCEEDED",
+
+  // Rate limiter errors
+  RATE_LIMITER_QUEUE_FULL: "RATE_LIMITER_QUEUE_FULL",
+  RATE_LIMITER_QUEUE_TIMEOUT: "RATE_LIMITER_QUEUE_TIMEOUT",
+  RATE_LIMITER_RESET: "RATE_LIMITER_RESET",
+
+  // Evaluation errors
+  SCORER_NOT_FOUND: "SCORER_NOT_FOUND",
+  EVALUATION_VALIDATION_FAILED: "EVALUATION_VALIDATION_FAILED",
+  EVALUATION_TIMEOUT: "EVALUATION_TIMEOUT",
+  EVALUATION_EXECUTION_FAILED: "EVALUATION_EXECUTION_FAILED",
+
+  // PPT validation errors
+  MISSING_PPT_PROPERTIES: "MISSING_PPT_PROPERTIES",
+  INVALID_PPT_PAGES: "INVALID_PPT_PAGES",
+  INVALID_PPT_FORMAT: "INVALID_PPT_FORMAT",
+  INVALID_PPT_PROVIDER: "INVALID_PPT_PROVIDER",
+  INVALID_PPT_OUTPUT_OPTIONS: "INVALID_PPT_OUTPUT_OPTIONS",
+  INVALID_PPT_OUTPUT_PATH: "INVALID_PPT_OUTPUT_PATH",
+  INVALID_PPT_LOGO_PATH: "INVALID_PPT_LOGO_PATH",
+  INVALID_PPT_MODE: "INVALID_PPT_MODE",
+  INVALID_PPT_PROMPT: "INVALID_PPT_PROMPT",
 } as const;
 
 /**
@@ -213,6 +259,694 @@ export class ErrorFactory {
       toolName,
     });
   }
+
+  /**
+   * Create a typed abort error preserving the originating exception. Callers
+   * can switch on `error.category === ErrorCategory.ABORT` and
+   * `error.code === ERROR_CODES.OPERATION_ABORTED` instead of message-string
+   * matching DOMException / AI SDK error wrappers.
+   *
+   * `error.name` is intentionally set to "AbortError" (overriding the default
+   * "NeuroLinkError") so existing callers that branch on
+   * `err.name === "AbortError"` keep working without code changes — the new
+   * structured fields (category, code, retriable) are additive.
+   */
+  static aborted(originalError?: Error): NeuroLinkError {
+    const err = new NeuroLinkError({
+      code: ERROR_CODES.OPERATION_ABORTED,
+      message: originalError?.message || "The operation was aborted",
+      category: ErrorCategory.ABORT,
+      severity: ErrorSeverity.LOW,
+      retriable: false,
+      context: {},
+      originalError,
+    });
+    err.name = "AbortError";
+    return err;
+  }
+
+  // ============================================================================
+  // CONFIGURATION ERRORS
+  // ============================================================================
+
+  /**
+   * Create a missing configuration error (e.g., missing API key)
+   */
+  static missingConfiguration(
+    configName: string,
+    context?: Record<string, unknown>,
+  ): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.MISSING_CONFIGURATION,
+      message: `Missing required configuration: ${configName}`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.HIGH,
+      retriable: false,
+      context: context || {},
+    });
+  }
+
+  /**
+   * Create an invalid configuration error (e.g., NaN for numeric values)
+   */
+  static invalidConfiguration(
+    configName: string,
+    reason: string,
+    context?: Record<string, unknown>,
+  ): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_CONFIGURATION,
+      message: `Invalid configuration for '${configName}': ${reason}`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.HIGH,
+      retriable: false,
+      context: context || {},
+    });
+  }
+
+  // ============================================================================
+  // VIDEO VALIDATION ERRORS
+  // ============================================================================
+
+  /**
+   * Create an invalid video resolution error
+   */
+  static invalidVideoResolution(resolution: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_VIDEO_RESOLUTION,
+      message: `Invalid resolution '${resolution}'. Use '720p' or '1080p'`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.video.resolution",
+        providedValue: resolution,
+        suggestions: ["Use '720p' for standard HD", "Use '1080p' for full HD"],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid video length error
+   */
+  static invalidVideoLength(length: number): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_VIDEO_LENGTH,
+      message: `Invalid length '${length}'. Use 4, 6, or 8 seconds`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.video.length",
+        providedValue: length,
+        suggestions: [
+          "Use 4 for short clips",
+          "Use 6 for balanced duration (recommended)",
+          "Use 8 for longer videos",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid video aspect ratio error
+   */
+  static invalidVideoAspectRatio(aspectRatio: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_VIDEO_ASPECT_RATIO,
+      message: `Invalid aspect ratio '${aspectRatio}'. Use '9:16' or '16:9'`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.video.aspectRatio",
+        providedValue: aspectRatio,
+        suggestions: [
+          "Use '9:16' for portrait/vertical video",
+          "Use '16:9' for landscape",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid video audio option error
+   */
+  static invalidVideoAudio(audio: unknown): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_VIDEO_AUDIO,
+      message: `Invalid audio option '${audio}'. Must be true or false`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.video.audio",
+        providedValue: audio,
+        suggestions: [
+          "Set audio: true to enable audio generation",
+          "Set audio: false to disable",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid video mode error
+   */
+  static invalidVideoMode(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_VIDEO_MODE,
+      message: "Video generation requires output.mode to be 'video'",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.mode",
+        suggestions: ["Set output: { mode: 'video' } for video generation"],
+      },
+    });
+  }
+
+  /**
+   * Create a missing video image error
+   */
+  static missingVideoImage(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.MISSING_VIDEO_IMAGE,
+      message: "Video generation requires an input image",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.images",
+        suggestions: [
+          "Provide an image via input.images array",
+          "Example: input: { text: 'prompt', images: [imageBuffer] }",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an empty video prompt error
+   */
+  static emptyVideoPrompt(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.EMPTY_VIDEO_PROMPT,
+      message: "Video prompt cannot be empty",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.text",
+        suggestions: [
+          "Provide a text prompt describing the desired video motion/content",
+          "Example: 'Smooth camera pan with dramatic lighting'",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create a video prompt too long error
+   */
+  static videoPromptTooLong(length: number, maxLength: number): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.VIDEO_PROMPT_TOO_LONG,
+      message: `Video prompt must be ${maxLength} characters or less (got ${length})`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.text",
+        providedLength: length,
+        maxLength,
+        suggestions: [
+          `Shorten your prompt to ${maxLength} characters or less`,
+          "Focus on key visual elements and camera motion",
+        ],
+      },
+    });
+  }
+
+  // ============================================================================
+  // IMAGE VALIDATION ERRORS
+  // ============================================================================
+
+  /**
+   * Create an empty image path error
+   */
+  static emptyImagePath(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.EMPTY_IMAGE_PATH,
+      message: "Image path or URL cannot be empty",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.images",
+        suggestions: ["Provide a valid file path or URL"],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid image type error
+   */
+  static invalidImageType(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_IMAGE_TYPE,
+      message: "Image must be a Buffer, file path string, or URL",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.images",
+        suggestions: [
+          "Provide image as Buffer: fs.readFileSync('image.jpg')",
+          "Or as file path string: './image.jpg'",
+          "Or as URL: 'https://example.com/image.jpg'",
+        ],
+      },
+    });
+  }
+
+  // ============================================================================
+  // PDF VALIDATION ERRORS
+  // ============================================================================
+
+  /**
+   * Create a PDF page limit exceeded error
+   */
+  static pdfPageLimitExceeded(
+    estimatedPages: number,
+    maxPages: number,
+    provider: string,
+  ): NeuroLinkError {
+    const alternatives = [
+      `Split the PDF into smaller files (max ${maxPages} pages each)`,
+      "Extract only the pages you need using a PDF editor",
+      "For large files, consider Google AI Studio which supports up to 2000MB file size (though page limits still apply)",
+      "Convert specific pages to images manually before processing",
+      "Bypass this limit with { enforceLimits: false } (not recommended - may cause API errors or unexpected costs)",
+    ];
+
+    return new NeuroLinkError({
+      code: ERROR_CODES.PDF_PAGE_LIMIT_EXCEEDED,
+      message:
+        `PDF page limit exceeded: ${estimatedPages} pages detected, but ${provider} supports maximum ${maxPages} pages.\n\n` +
+        `Alternatives:\n` +
+        alternatives.map((alt, i) => `${i + 1}. ${alt}`).join("\n"),
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        estimatedPages,
+        maxPages,
+        provider,
+        alternatives,
+      },
+    });
+  }
+
+  /**
+   * Create an image too large error
+   */
+  static imageTooLarge(sizeMB: string, maxMB: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.IMAGE_TOO_LARGE,
+      message: `Image size (${sizeMB}MB) exceeds maximum (${maxMB}MB)`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.images",
+        sizeMB,
+        maxMB,
+        suggestions: [
+          `Compress or resize the image to under ${maxMB}MB`,
+          "Use a lower quality JPEG compression",
+          "Reduce image dimensions",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an image too small error
+   */
+  static imageTooSmall(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.IMAGE_TOO_SMALL,
+      message: "Image data is too small to be a valid image file",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.images",
+        suggestions: ["Provide a valid JPEG, PNG, or WebP image file"],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid image format error
+   */
+  static invalidImageFormat(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_IMAGE_FORMAT,
+      message: "Unsupported image format. Use JPEG, PNG, or WebP",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.images",
+        suggestions: [
+          "Convert your image to JPEG, PNG, or WebP format",
+          "Ensure the file is not corrupted",
+          "Check that the file extension matches the actual format",
+        ],
+      },
+    });
+  }
+
+  // ============================================================================
+  // RATE LIMITER ERRORS
+  // ============================================================================
+
+  /**
+   * Create a rate limiter queue full error
+   */
+  static rateLimiterQueueFull(maxQueueSize: number): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.RATE_LIMITER_QUEUE_FULL,
+      message: `Rate limiter queue full: too many pending requests (${maxQueueSize} max)`,
+      category: ErrorCategory.RESOURCE,
+      severity: ErrorSeverity.HIGH,
+      retriable: true,
+      context: { maxQueueSize },
+    });
+  }
+
+  /**
+   * Create a rate limiter queue timeout error
+   */
+  static rateLimiterQueueTimeout(timeoutMs: number): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.RATE_LIMITER_QUEUE_TIMEOUT,
+      message: `Rate limiter queue timeout: request exceeded ${timeoutMs}ms wait time`,
+      category: ErrorCategory.TIMEOUT,
+      severity: ErrorSeverity.HIGH,
+      retriable: true,
+      context: { timeoutMs },
+    });
+  }
+
+  /**
+   * Create a rate limiter reset error
+   */
+  static rateLimiterReset(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.RATE_LIMITER_RESET,
+      message: "Rate limiter was reset while request was pending",
+      category: ErrorCategory.EXECUTION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: true,
+      context: {},
+    });
+  }
+
+  // ============================================================================
+  // PPT VALIDATION ERRORS
+  // ============================================================================
+
+  /**
+   * Create a generic missing PPT property error
+   */
+  static missingPPTProperty(
+    field: string,
+    suggestions?: string[],
+  ): NeuroLinkError {
+    const defaultSuggestions = [`Provide the required '${field}' field`];
+
+    return new NeuroLinkError({
+      code: ERROR_CODES.MISSING_PPT_PROPERTIES,
+      message: `PPT generation requires '${field}' field`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field,
+        suggestions: suggestions || defaultSuggestions,
+      },
+    });
+  }
+
+  /**
+   * Create an invalid PPT pages error
+   */
+  static invalidPPTPages(pages: unknown, reason: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_PAGES,
+      message: `Invalid pages value '${pages}': ${reason}`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.ppt.pages",
+        providedValue: pages,
+        suggestions: [
+          "Use a number between 5 and 50",
+          "For longer presentations, consider breaking into multiple decks",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid PPT format error
+   */
+  static invalidPPTFormat(format: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_FORMAT,
+      message: `Invalid format '${format}'. Only 'pptx' is supported`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.ppt.format",
+        providedValue: format,
+        suggestions: ["Use format: 'pptx' or omit (defaults to 'pptx')"],
+      },
+    });
+  }
+
+  /**
+   * Create a generic invalid PPT output options error
+   */
+  static invalidPPTOutputOptions(
+    field: string,
+    value: unknown,
+    validOptions?: string[],
+  ): NeuroLinkError {
+    const suggestions = validOptions
+      ? validOptions.map((opt) => `Use '${opt}'`)
+      : ["Check the documentation for valid options"];
+
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_OUTPUT_OPTIONS,
+      message: `Invalid ${field} value '${value}'`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: `output.ppt.${field}`,
+        providedValue: value,
+        suggestions,
+      },
+    });
+  }
+
+  /**
+   * Create an invalid PPT output path error
+   */
+  static invalidPPTOutputPath(path: unknown, reason: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_OUTPUT_PATH,
+      message: `Invalid outputPath '${path}': ${reason}`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.ppt.outputPath",
+        providedValue: path,
+        suggestions: [
+          "Provide a valid file path string",
+          "Example: './presentations/my-deck.pptx'",
+          "Omit to use auto-generated path",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid PPT mode error
+   */
+  static invalidPPTMode(): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_MODE,
+      message: "Presentation generation requires output.mode to be 'ppt'",
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.mode",
+        suggestions: [
+          "Set output: { mode: 'ppt' } for presentation generation",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid PPT prompt error
+   */
+  static invalidPPTPrompt(reason: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_PROMPT,
+      message: `Invalid PPT prompt: ${reason}`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "input.text",
+        suggestions: [
+          "Provide a non-empty text prompt",
+          "Keep the prompt under 1000 characters",
+          "Focus on key topics and structure for the presentation",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid PPT logo path error
+   */
+  static invalidPPTLogoPath(path: unknown, reason: string): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_LOGO_PATH,
+      message: `Invalid logoPath '${path}': ${reason}`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "output.ppt.logoPath",
+        providedValue: path,
+        suggestions: [
+          "Provide a valid file path string",
+          "Example: './assets/logo.png'",
+          "Omit to skip logo inclusion",
+        ],
+      },
+    });
+  }
+
+  /**
+   * Create an invalid PPT provider error
+   */
+  static invalidPPTProvider(provider: unknown): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.INVALID_PPT_PROVIDER,
+      message: `Invalid provider '${provider}' for PPT generation. Supported providers: vertex, openai, azure, anthropic, google-ai, bedrock`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: {
+        field: "provider",
+        providedValue: provider,
+        suggestions: [
+          "Use 'vertex' for Google Vertex AI (Gemini)",
+          "Use 'openai' for OpenAI GPT models",
+          "Use 'azure' for Azure OpenAI",
+          "Use 'anthropic' for Anthropic Claude models",
+          "Use 'google-ai' for Google AI Studio (Gemini)",
+          "Use 'bedrock' for AWS Bedrock (Claude, Llama, Nova, etc.)",
+        ],
+      },
+    });
+  }
+
+  // ============================================================================
+  // EVALUATION ERRORS
+  // ============================================================================
+
+  /**
+   * Create a scorer not found error
+   */
+  static scorerNotFound(
+    scorerId: string,
+    availableScorers?: string[],
+  ): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.SCORER_NOT_FOUND,
+      message: `Scorer '${scorerId}' not found. Use neurolink.getAvailableScorers() to see available scorers.`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: { scorerId, availableScorers },
+    });
+  }
+
+  /**
+   * Create an evaluation validation error
+   */
+  static evaluationValidationFailed(
+    scorerId: string,
+    errors: string[],
+  ): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.EVALUATION_VALIDATION_FAILED,
+      message: `Invalid input for scorer '${scorerId}': ${errors.join(", ")}`,
+      category: ErrorCategory.VALIDATION,
+      severity: ErrorSeverity.MEDIUM,
+      retriable: false,
+      context: { scorerId, validationErrors: errors },
+    });
+  }
+
+  /**
+   * Create an evaluation timeout error
+   */
+  static evaluationTimeout(
+    operation: string,
+    timeoutMs: number,
+  ): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.EVALUATION_TIMEOUT,
+      message: `Evaluation ${operation} timed out after ${timeoutMs}ms`,
+      category: ErrorCategory.TIMEOUT,
+      severity: ErrorSeverity.HIGH,
+      retriable: true,
+      context: { operation, timeoutMs },
+    });
+  }
+
+  /**
+   * Create an evaluation execution failed error
+   */
+  static evaluationExecutionFailed(
+    operation: string,
+    originalError: Error,
+  ): NeuroLinkError {
+    return new NeuroLinkError({
+      code: ERROR_CODES.EVALUATION_EXECUTION_FAILED,
+      message: `Evaluation ${operation} failed: ${originalError.message}`,
+      category: ErrorCategory.EXECUTION,
+      severity: ErrorSeverity.HIGH,
+      retriable: false,
+      originalError,
+    });
+  }
 }
 
 /**
@@ -283,19 +1017,30 @@ export class CircuitBreaker {
   private failures = 0;
   private lastFailureTime = 0;
   private state: "closed" | "open" | "half-open" = "closed";
+  private name: string;
 
   constructor(
     private readonly failureThreshold: number = 5,
     private readonly resetTimeoutMs: number = 60000,
-  ) {}
+    name: string = "tool-execution",
+  ) {
+    this.name = name;
+  }
 
   async execute<T>(operation: () => Promise<T>): Promise<T> {
     if (this.state === "open") {
-      if (Date.now() - this.lastFailureTime > this.resetTimeoutMs) {
-        this.state = "half-open";
-      } else {
-        throw new Error("Circuit breaker is open - operation not executed");
+      const retryAfterMs =
+        this.resetTimeoutMs - (Date.now() - this.lastFailureTime);
+      if (retryAfterMs > 0) {
+        throw new CircuitBreakerOpenError({
+          breakerName: this.name,
+          retryAfter: new Date(this.lastFailureTime + this.resetTimeoutMs),
+          retryAfterMs,
+          breakerState: "open",
+          failureCount: this.failures,
+        });
       }
+      this.state = "half-open";
     }
 
     try {
@@ -332,11 +1077,49 @@ export class CircuitBreaker {
 }
 
 /**
+ * Detect AbortError from any source (DOMException, plain Error, or message-based).
+ * Used to short-circuit retry/fallback loops when an abort signal fires.
+ *
+ * Uses `includes()` for message checks because provider error handlers
+ * (e.g., googleVertex.formatProviderError) wrap the original AbortError
+ * in a formatted error like "❌ Provider Error\n\nThis operation was aborted\n\n..."
+ * which destroys the exact message match.
+ */
+export function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return true;
+  }
+  // Typed NeuroLinkError abort - canonical from-now-on shape.
+  if (
+    error instanceof NeuroLinkError &&
+    error.category === ErrorCategory.ABORT
+  ) {
+    return true;
+  }
+  if (
+    error instanceof Error &&
+    (error.message?.includes("This operation was aborted") ||
+      error.message?.includes("The operation was aborted") ||
+      error.message?.includes("The user aborted a request"))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Error handler that decides whether to retry based on error type
  */
 export function isRetriableError(error: Error): boolean {
   if (error instanceof NeuroLinkError) {
     return error.retriable;
+  }
+
+  if (error instanceof HITLTimeoutError) {
+    return false;
   }
 
   // Check for common retriable error patterns
@@ -353,6 +1136,57 @@ export function isRetriableError(error: Error): boolean {
   ];
 
   return retriablePatterns.some((pattern) => pattern.test(error.message));
+}
+
+/**
+ * Determines if an error is likely recoverable (rate limit, timeout, network issues).
+ * Useful for deciding whether to retry or fail fast.
+ */
+export function isRecoverableError(error: Error): boolean {
+  // Check NeuroLinkError.retriable first
+  const errorWithRetriable = error as Error & { retriable?: boolean };
+  if (
+    "retriable" in error &&
+    typeof errorWithRetriable.retriable === "boolean"
+  ) {
+    return errorWithRetriable.retriable;
+  }
+
+  const message = error.message?.toLowerCase() || "";
+
+  // Rate limit errors
+  if (message.includes("rate limit") || message.includes("too many requests")) {
+    return true;
+  }
+  if (/\b429\b/.test(message)) {
+    return true;
+  }
+
+  // Timeout errors
+  if (
+    message.includes("timeout") ||
+    message.includes("etimedout") ||
+    message.includes("timed out")
+  ) {
+    return true;
+  }
+
+  // Network errors
+  if (
+    message.includes("econnreset") ||
+    message.includes("econnrefused") ||
+    message.includes("network") ||
+    message.includes("socket")
+  ) {
+    return true;
+  }
+
+  // Server errors (use word boundaries to avoid false matches)
+  if (/\b50[0234]\b/.test(message)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**

@@ -14,23 +14,23 @@
  * @module core/modules/TelemetryHandler
  */
 
-import type {
-  AIProviderName,
-  EnhancedGenerateResult,
-  TextGenerationOptions,
-  AnalyticsData,
-} from "../../types/index.js";
-import type { Context } from "../../types/common.js";
-import type { EvaluationData } from "../../types/index.js";
-import type { StreamOptions } from "../../types/streamTypes.js";
-import { logger } from "../../utils/logger.js";
 import { nanoid } from "nanoid";
-import { modelConfig } from "../modelConfiguration.js";
-import {
-  recordProviderPerformanceFromMetrics,
-  getPerformanceOptimizedProvider,
-} from "../evaluationProviders.js";
 import type { NeuroLink } from "../../neurolink.js";
+import type {
+  Context,
+  StreamOptions,
+  AIProviderName,
+  AnalyticsData,
+  EnhancedGenerateResult,
+  EvaluationData,
+  TextGenerationOptions,
+} from "../../types/index.js";
+import { logger } from "../../utils/logger.js";
+import { recordProviderPerformanceFromMetrics } from "../evaluationProviders.js";
+import { modelConfig } from "../modelConfiguration.js";
+import { TelemetryService } from "../../telemetry/telemetryService.js";
+import { calculateCost, hasPricing } from "../../utils/pricing.js";
+import { getLangfuseContext } from "../../services/server/ai/observability/instrumentation.js";
 
 /**
  * TelemetryHandler class - Handles analytics and telemetry for AI providers
@@ -100,28 +100,37 @@ export class TelemetryHandler {
    */
   async recordPerformanceMetrics(
     usage:
-      | { promptTokens: number; completionTokens: number; totalTokens: number }
+      | { inputTokens: number | undefined; outputTokens: number | undefined }
       | undefined,
     responseTime: number,
   ): Promise<void> {
     try {
+      const totalTokens =
+        (usage?.inputTokens || 0) + (usage?.outputTokens || 0);
       const actualCost = await this.calculateActualCost(
-        usage || { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        usage || { inputTokens: 0, outputTokens: 0 },
       );
 
       recordProviderPerformanceFromMetrics(this.providerName, {
         responseTime,
-        tokensGenerated: usage?.totalTokens || 0,
+        tokensGenerated: totalTokens,
         cost: actualCost,
         success: true,
       });
 
-      const optimizedProvider = getPerformanceOptimizedProvider("speed");
-      logger.debug(`🚀 Performance recorded for ${this.providerName}:`, {
+      // Wire TelemetryService metrics so OTEL counters/histograms are populated
+      TelemetryService.getInstance().recordAIRequest(
+        this.providerName,
+        this.modelName,
+        totalTokens,
+        responseTime,
+        actualCost > 0 ? actualCost : undefined,
+      );
+
+      logger.debug(`Performance recorded for ${this.providerName}`, {
         responseTime: `${responseTime}ms`,
-        tokens: usage?.totalTokens || 0,
+        tokens: totalTokens,
         estimatedCost: `$${actualCost.toFixed(6)}`,
-        recommendedSpeedProvider: optimizedProvider?.provider || "none",
       });
     } catch (perfError) {
       logger.warn("⚠️ Performance recording failed:", perfError);
@@ -129,14 +138,36 @@ export class TelemetryHandler {
   }
 
   /**
-   * Calculate actual cost based on token usage and provider configuration
+   * Calculate actual cost based on token usage and provider configuration.
+   *
+   * Uses the per-model pricing table first (which has accurate rates for
+   * specific models like Claude on Vertex AI), then falls back to the
+   * provider-level default cost from modelConfiguration.
+   *
+   * Previously this only used modelConfig.getCostInfo() which returns
+   * provider-level defaults (e.g. Gemini rates for the "vertex" provider),
+   * causing a ~1,780x under-estimate when the actual model was Claude Sonnet
+   * on Vertex AI ($0.000060 vs $0.106895 for the same request).
    */
   async calculateActualCost(usage: {
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
+    inputTokens?: number | undefined;
+    outputTokens?: number | undefined;
   }): Promise<number> {
     try {
+      const promptTokens = usage?.inputTokens || 0;
+      const completionTokens = usage?.outputTokens || 0;
+
+      // Try the per-model pricing table first (includes correct rates for
+      // Claude on Vertex, cache token rates, etc.)
+      if (hasPricing(this.providerName, this.modelName)) {
+        return calculateCost(this.providerName, this.modelName, {
+          input: promptTokens,
+          output: completionTokens,
+          total: promptTokens + completionTokens,
+        });
+      }
+
+      // Fall back to provider-level default cost from configuration system
       const costInfo = modelConfig.getCostInfo(
         this.providerName,
         this.modelName,
@@ -144,9 +175,6 @@ export class TelemetryHandler {
       if (!costInfo) {
         return 0; // No cost info available
       }
-
-      const promptTokens = usage?.promptTokens || 0;
-      const completionTokens = usage?.completionTokens || 0;
 
       // Calculate cost per 1K tokens
       const inputCost = (promptTokens / 1000) * costInfo.input;
@@ -160,9 +188,10 @@ export class TelemetryHandler {
   }
 
   /**
-   * Get telemetry configuration for streaming/generation
+   * Create telemetry configuration for Vercel AI SDK experimental_telemetry
+   * This enables automatic OpenTelemetry tracing when telemetry is enabled
    */
-  getStreamTelemetryConfig(
+  getTelemetryConfig(
     options: StreamOptions | TextGenerationOptions,
     operationType: "stream" | "generate" = "stream",
   ):
@@ -170,6 +199,8 @@ export class TelemetryHandler {
         isEnabled: boolean;
         functionId?: string;
         metadata?: Record<string, string | number | boolean>;
+        recordInputs?: boolean;
+        recordOutputs?: boolean;
       }
     | undefined {
     // Check if telemetry is enabled via NeuroLink observability config
@@ -178,11 +209,13 @@ export class TelemetryHandler {
     }
 
     const context = options.context as Context;
-    const traceName = context?.traceName;
-    const userId = context?.userId;
+    const langfuseContext = getLangfuseContext();
+    const traceName = context?.traceName ?? langfuseContext?.traceName;
+    const userId = context?.userId ?? langfuseContext?.userId;
     const functionId = traceName ? traceName : userId ? userId : "guest";
 
     const metadata: Record<string, string | number | boolean> = {
+      ...(context?.metadata || {}),
       provider: this.providerName,
       model: this.modelName,
       toolsEnabled: !options.disableTools,
@@ -207,6 +240,9 @@ export class TelemetryHandler {
       isEnabled: true,
       functionId,
       metadata,
+      recordInputs:
+        process.env.NEUROLINK_RECORD_INPUTS?.toLowerCase() !== "false",
+      recordOutputs: true,
     };
   }
 
@@ -254,6 +290,7 @@ export class TelemetryHandler {
         toolResults as Array<{
           toolCallId?: string;
           toolName?: string;
+          output?: unknown;
           result?: unknown;
           [key: string]: unknown;
         }>,

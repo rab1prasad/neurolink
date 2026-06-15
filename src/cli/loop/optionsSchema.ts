@@ -1,7 +1,8 @@
 import { AIProviderName } from "../../lib/constants/enums.js";
-import type { TextGenerationOptions } from "../../lib/types/generateTypes.js";
-import type { OptionSchema } from "../../lib/types/cli.js";
-
+import type {
+  OptionSchema,
+  TextGenerationOptions,
+} from "../../lib/types/index.js";
 /**
  * Master schema for all text generation options.
  * This object provides metadata for validation and help text in the CLI loop.
@@ -26,6 +27,18 @@ export const textGenerationOptionsSchema: Record<
     | "region"
     | "csvOptions"
     | "tts"
+    | "stt" // Complex object, set via --stt* flags
+    | "thinkingConfig" // Complex object, use thinking/thinkingBudget instead
+    | "requestId" // Observability ID, not CLI-settable
+    | "fileRegistry" // Internal: set by SDK, not by CLI
+    | "abortSignal" // Runtime object, not CLI-settable
+    | "toolFilter" // Array type, not simple CLI option
+    | "excludeTools" // Array type, not simple CLI option
+    | "toolChoice" // Complex type, not suitable for simple CLI input
+    | "prepareStep" // Callback function, only usable via SDK
+    | "credentials" // Complex per-provider object, only usable via SDK
+    | "onFinish" // Lifecycle callback, only usable via SDK
+    | "onError" // Lifecycle callback, only usable via SDK
   >,
   OptionSchema
 > = {
@@ -48,6 +61,21 @@ export const textGenerationOptionsSchema: Record<
     type: "number",
     description: "The maximum number of tokens to generate.",
   },
+  topP: {
+    type: "number",
+    description:
+      "Top-p (nucleus) sampling parameter. Controls diversity of generated tokens (0.0-1.0).",
+  },
+  topK: {
+    type: "number",
+    description:
+      "Top-k sampling parameter. Limits the number of tokens considered (Google/Gemini models only).",
+  },
+  stopSequences: {
+    type: "string",
+    description:
+      "Stop sequences that will halt generation when encountered (comma-separated).",
+  },
   output: {
     type: "string",
     description:
@@ -65,6 +93,11 @@ export const textGenerationOptionsSchema: Record<
   disableTools: {
     type: "boolean",
     description: "Disable all tool usage for the AI.",
+  },
+  enabledToolNames: {
+    type: "string",
+    description:
+      'Comma-separated list of tool names to enable (e.g., "read,write,search").',
   },
   maxSteps: {
     type: "number",
@@ -91,5 +124,29 @@ export const textGenerationOptionsSchema: Record<
     type: "boolean",
     description:
       "Enable or disable automatic conversation summarization for this request.",
+  },
+  thinking: {
+    type: "boolean",
+    description: "Enable extended thinking/reasoning capability.",
+  },
+  thinkingBudget: {
+    type: "number",
+    description: "Token budget for thinking (Anthropic models: 5000-100000).",
+  },
+  thinkingLevel: {
+    type: "string",
+    description:
+      "Thinking level for Gemini 3 models: minimal, low, medium, high.",
+    allowedValues: ["minimal", "low", "medium", "high"],
+  },
+  skipToolPromptInjection: {
+    type: "boolean",
+    description:
+      "Skip injecting tool descriptions into the system prompt. Useful when tool info is already provided.",
+  },
+  disableToolCache: {
+    type: "boolean",
+    description:
+      "Disable tool result caching for this request (overrides global mcp.cache.enabled).",
   },
 };
