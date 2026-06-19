@@ -1,3 +1,21 @@
+## [9.73.0](https://github.com/juspay/neurolink/compare/v9.72.0...v9.73.0) (2026-06-18)
+
+### Features
+
+- **(voice):** add support for s2s agent in neurolink through livekit ([ad76017](https://github.com/juspay/neurolink/commit/ad76017834e22ff589b485706e65b55dce1c05ec))
+
+## [9.72.0](https://github.com/juspay/neurolink/compare/v9.71.0...v9.72.0) (2026-06-17)
+
+### Features
+
+- **(tool-routing):** pre-call per-turn tool routing via config ([d78d691](https://github.com/juspay/neurolink/commit/d78d6912b83e9b0ec75245f1624cc7e11d4fb1b0))
+
+## [9.71.0](https://github.com/juspay/neurolink/compare/v9.70.7...v9.71.0) (2026-06-16)
+
+### Features
+
+- **(observability):** emit Langfuse spans for the native Vertex provider path ([a90f3ec](https://github.com/juspay/neurolink/commit/a90f3ec8664ef730425a15d10bb19eb1f722480f))
+
 ## [9.70.7](https://github.com/juspay/neurolink/compare/v9.70.6...v9.70.7) (2026-06-13)
 
 ### Bug Fixes
